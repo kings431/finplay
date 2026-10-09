@@ -65,6 +65,12 @@ dylibbundler -of -b \
   -p @loader_path/ \
   -s "$(brew --prefix)/lib"
 chmod u+w "$DEST"/*.dylib
+# dylibbundler can add @loader_path/ twice; recent dyld refuses to load that.
+for lib in "$DEST"/*.dylib; do
+  while [[ "$(otool -l "$lib" | grep -A2 LC_RPATH | grep -c '@loader_path/ ')" -gt 1 ]]; do
+    install_name_tool -delete_rpath @loader_path/ "$lib"
+  done
+done
 codesign --force --sign - "$DEST"/*.dylib
 test -f "$DEST/libmpv.2.dylib"
 echo "    libmpv ready ($(du -sh "$DEST" | awk '{print $1}'))"
