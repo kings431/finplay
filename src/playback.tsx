@@ -56,7 +56,11 @@ type PlaybackContextValue = {
   togglePause: () => Promise<void>;
   seek: (seconds: number) => Promise<void>;
   setPaused: (paused: boolean) => Promise<void>;
+  /** While set, `play` hands titles to this instead of the local player. */
+  setRemote: (send: RemoteSend | null) => void;
 };
+
+export type RemoteSend = (item: BaseItem, startTicks: number, mediaSourceId?: string) => Promise<void>;
 
 /** `resume` means the caller already chose to resume, so no prompt is shown. */
 export type PlayOptions = {
@@ -68,6 +72,8 @@ export type PlayOptions = {
   startAt?: number;
   /** Plays this remote trailer (a `trailerStream` address) for the item instead. */
   trailerUrl?: string;
+  /** Plays here even while another device is chosen to play on. */
+  local?: boolean;
 };
 
 type ResumeAsk = { item: BaseItem; seconds: number; resolve: (choice: "resume" | "start" | null) => void };
@@ -114,6 +120,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const stopSent = useRef(false);
   const navigateRef = useRef(navigate);
   const trickplayRef = useRef<TrickplayRenderer | null>(null);
+  const remoteRef = useRef<RemoteSend | null>(null);
+  const pausedRef = useRef(false);
+  /** What the server last heard, to report changes as they happen. */
+  const sentRef = useRef({ paused: false, position: 0, at: 0, volume: 100, muted: false });
   const nextRef = useRef<BaseItem | null>(null);
   const playRef = useRef<(item: BaseItem, options?: PlayOptions) => Promise<void>>(async () => {});
   const [resumeAsk, setResumeAsk] = useState<ResumeAsk | null>(null);
@@ -194,6 +204,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     if (!inTauri()) return;
     let cancel = false;
     let unlisten: (() => void) | undefined;
+    const sendProgress = (current: ActivePlayback, isPaused: boolean) => {
+      const { volume, muted } = volumeRef.current;
+      sentRef.current = { paused: isPaused, position: positionRef.current, at: Date.now(), volume, muted };
+      void report(current, "progress", positionRef.current, isPaused);
+    };
     listenPlayer((event: PlayerEvent) => {
       const current = activeRef.current;
       if (!current) return;
@@ -208,6 +223,17 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       setPosition(event.time || 0);
       setDuration(event.duration || 0);
       setPaused(event.paused);
+      pausedRef.current = event.paused;
+      // Remote controls show the server's view, so tell it about pauses, seeks
+      // and volume changes now rather than at the next timed report.
+      const sent = sentRef.current;
+      const expected = sent.position + (sent.paused ? 0 : (Date.now() - sent.at) / 1000);
+      const changed =
+        event.paused !== sent.paused ||
+        Math.abs((event.time || 0) - expected) > 3 ||
+        volumeRef.current.volume !== sent.volume ||
+        volumeRef.current.muted !== sent.muted;
+      if (changed && !event.ended && !stopSent.current && event.reason !== "error") sendProgress(current, event.paused);
       if (event.reason === "error") {
         setError(event.detail ? `mpv could not play this stream: ${event.detail}` : "mpv could not play this stream.");
         void playerStop().then(() => finish(true));
@@ -240,7 +266,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     const timer = window.setInterval(() => {
       const current = activeRef.current;
       if (!current || stopSent.current) return;
-      void report(current, "progress", positionRef.current, false);
+      sendProgress(current, pausedRef.current);
     }, 8000);
     return () => {
       cancel = true;
@@ -317,6 +343,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           throw err;
         }
         if (activeRef.current?.playSessionId !== playback.playSessionId) return;
+        pausedRef.current = false;
+        sentRef.current = { ...volumeRef.current, paused: false, position: startSeconds, at: Date.now() };
         void report(playback, "start", startSeconds, false);
         navigate(`/playing/${playback.item.Id}`);
       };
@@ -391,6 +419,14 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
               title: `${item.Name} · Trailer`,
             },
           );
+          return;
+        }
+        const remote = remoteRef.current;
+        if (remote && !options?.local && statusRef.current === "ready") {
+          const target = await resolveTarget(client, item, options?.fromStart ?? false);
+          const chosen = options?.startAt ?? (await chooseStart(target.item, options?.fromStart ? 0 : ticksToSeconds(target.ticks)));
+          if (chosen === null) return;
+          await remote(target.item, secondsToTicks(chosen), options?.mediaSourceId);
           return;
         }
         const download = downloadsRef.current.find(item.Id);
@@ -581,6 +617,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       togglePause,
       seek,
       setPaused: pauseTo,
+      setRemote: (send) => {
+        remoteRef.current = send;
+      },
     }),
     [active, busy, error, position, duration, paused, finished, play, stop, togglePause, seek, pauseTo],
   );

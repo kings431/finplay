@@ -232,6 +232,19 @@ export type ActiveSession = {
   };
 };
 
+/** Another Jellyfin client this user can send titles to and control. */
+export type RemoteSession = {
+  Id: string;
+  DeviceId?: string;
+  DeviceName?: string;
+  Client?: string;
+  UserName?: string;
+  SupportsRemoteControl?: boolean;
+  Capabilities?: { SupportedCommands?: string[] };
+  NowPlayingItem?: BaseItem;
+  PlayState?: { PositionTicks?: number; IsPaused?: boolean; VolumeLevel?: number; IsMuted?: boolean };
+};
+
 export type Theme = "system" | "dark" | "light" | "tv";
 
 export type Settings = {

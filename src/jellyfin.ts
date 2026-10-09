@@ -4,6 +4,7 @@ import type {
   ItemList,
   MediaSegment,
   PlaybackInfo,
+  RemoteSession,
   SeerrRequestPage,
   SeerrResult,
   SeerrSearch,
@@ -386,13 +387,36 @@ export class Jellyfin {
     return this.send("POST", path, body);
   }
 
+  /** Tells the server other clients may send titles here and control playback. */
   capabilities() {
     return this.send("POST", "/Sessions/Capabilities/Full", {
       PlayableMediaTypes: ["Video", "Audio"],
-      SupportedCommands: [],
-      SupportsMediaControl: false,
+      SupportedCommands: ["SetVolume", "VolumeUp", "VolumeDown", "ToggleMute", "Mute", "Unmute", "SetAudioStreamIndex", "SetSubtitleStreamIndex", "DisplayMessage", "ToggleFullscreen"],
+      SupportsMediaControl: true,
       SupportsPersistentIdentifier: true,
     });
+  }
+
+  /** Other clients signed in for this user that accept remote control. */
+  async remoteSessions() {
+    const params = new URLSearchParams({ ControllableByUserId: this.auth.userId, ActiveWithinSeconds: "1800" });
+    const sessions = await this.json<RemoteSession[]>(`/Sessions?${params}`);
+    return sessions.filter((session) => session.SupportsRemoteControl && session.DeviceId !== this.auth.deviceId);
+  }
+
+  remotePlay(sessionId: string, itemId: string, startTicks: number, mediaSourceId?: string) {
+    const params = new URLSearchParams({ playCommand: "PlayNow", itemIds: itemId, startPositionTicks: String(Math.round(startTicks)) });
+    if (mediaSourceId) params.set("mediaSourceId", mediaSourceId);
+    return this.send("POST", `/Sessions/${sessionId}/Playing?${params}`);
+  }
+
+  remotePlaystate(sessionId: string, command: "Pause" | "Unpause" | "PlayPause" | "Stop" | "Seek", seekTicks?: number) {
+    const query = command === "Seek" ? `?${new URLSearchParams({ seekPositionTicks: String(Math.round(seekTicks ?? 0)) })}` : "";
+    return this.send("POST", `/Sessions/${sessionId}/Playing/${command}${query}`);
+  }
+
+  remoteCommand(sessionId: string, name: string, args: Record<string, string> = {}) {
+    return this.send("POST", `/Sessions/${sessionId}/Command`, { Name: name, Arguments: args });
   }
 
   seerrUserStatus() {

@@ -8,6 +8,7 @@ import { useSession } from "../session";
 import { useSyncPlay } from "../syncplay";
 import { Popover } from "./Popover";
 import { UpdateBanner } from "./UpdateBanner";
+import { CastButton, RemoteBar } from "./Cast";
 
 const OFFLINE_PATHS = ["/downloads", "/settings", "/playing/", "/item/"];
 
@@ -174,6 +175,7 @@ export function Shell() {
               <span>Stats</span>
             </NavLink>
           ) : null}
+          {offline ? null : <CastButton />}
           {active ? (
             <button className="now-pill" onClick={() => navigate(`/playing/${active.item.Id}`)}>
               Playing
@@ -211,6 +213,7 @@ export function Shell() {
         <Outlet />
       </main>
       {together.notice ? <div className="toast">{together.notice}</div> : null}
+      {offline ? null : <RemoteBar />}
     </div>
   );
 }

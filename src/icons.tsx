@@ -14,6 +14,24 @@ function base(size = 22) {
   };
 }
 
+export function IconCast({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="M3.5 9V6.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14" />
+      <path d="M3.5 12.5a7 7 0 0 1 7 7M3.5 16a3.5 3.5 0 0 1 3.5 3.5" />
+      <path d="M3.5 19.5h.01" strokeWidth={2.6} />
+    </svg>
+  );
+}
+
+export function IconStop({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function IconHome({ size }: IconProps) {
   return (
     <svg {...base(size)}>

@@ -116,7 +116,7 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
         await client.sync("Buffering", body(ticks));
         const item = await client.item(entry.ItemId);
         const mediaSourceId = sourceRef.current && sourceRef.current.startsWith(`${entry.ItemId}:`) ? sourceRef.current.slice(entry.ItemId.length + 1) : undefined;
-        await playbackRef.current.play(item, { startAt: ticksToSeconds(ticks), returnTo: "/together", mediaSourceId });
+        await playbackRef.current.play(item, { startAt: ticksToSeconds(ticks), returnTo: "/together", mediaSourceId, local: true });
         if (!(await waitForPlayer(item.Id))) throw new Error("The title didn't start in time.");
         await playbackRef.current.setPaused(true);
         expect(true, ticksToSeconds(ticks));

@@ -16,6 +16,7 @@ import { Requests } from "./pages/Requests";
 import { LiveTv } from "./pages/LiveTv";
 import { Together } from "./pages/Together";
 import { SyncPlayProvider } from "./syncplay";
+import { RemoteProvider } from "./remote";
 import { DownloadsProvider } from "./downloads";
 import { Settings } from "./pages/Settings";
 import { Playing } from "./pages/Playing";
@@ -50,31 +51,33 @@ export function App() {
         <DownloadsProvider>
           <PlaybackProvider>
             <SyncPlayProvider>
-              <Routes>
-                <Route element={<GuestOnly />}>
-                  <Route path="/login" element={<Login />} />
-                </Route>
-                <Route element={<RequireAuth />}>
-                  <Route element={<Shell />}>
-                    <Route path="/" element={<Home />} />
-                    <Route path="/libraries" element={<Libraries />} />
-                    <Route path="/library/:id" element={<Library />} />
-                    <Route path="/item/:id" element={<Detail />} />
-                    <Route path="/search" element={<Search />} />
-                    <Route path="/discover" element={<Discover />} />
-                    <Route path="/discover/:slug" element={<DiscoverList />} />
-                    <Route path="/requests" element={<Requests />} />
-                    <Route path="/livetv" element={<LiveTv />} />
-                    <Route path="/together" element={<Together />} />
-                    <Route path="/downloads" element={<Downloads />} />
-                    <Route path="/stats" element={<Stats />} />
-                    <Route path="/person/:id" element={<Person />} />
-                    <Route path="/settings" element={<Settings />} />
-                    <Route path="/playing/:id" element={<Playing />} />
+              <RemoteProvider>
+                <Routes>
+                  <Route element={<GuestOnly />}>
+                    <Route path="/login" element={<Login />} />
                   </Route>
-                </Route>
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
+                  <Route element={<RequireAuth />}>
+                    <Route element={<Shell />}>
+                      <Route path="/" element={<Home />} />
+                      <Route path="/libraries" element={<Libraries />} />
+                      <Route path="/library/:id" element={<Library />} />
+                      <Route path="/item/:id" element={<Detail />} />
+                      <Route path="/search" element={<Search />} />
+                      <Route path="/discover" element={<Discover />} />
+                      <Route path="/discover/:slug" element={<DiscoverList />} />
+                      <Route path="/requests" element={<Requests />} />
+                      <Route path="/livetv" element={<LiveTv />} />
+                      <Route path="/together" element={<Together />} />
+                      <Route path="/downloads" element={<Downloads />} />
+                      <Route path="/stats" element={<Stats />} />
+                      <Route path="/person/:id" element={<Person />} />
+                      <Route path="/settings" element={<Settings />} />
+                      <Route path="/playing/:id" element={<Playing />} />
+                    </Route>
+                  </Route>
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </RemoteProvider>
             </SyncPlayProvider>
           </PlaybackProvider>
         </DownloadsProvider>
