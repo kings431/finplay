@@ -17,4 +17,4 @@ edit("package.json", /"version": "[^"]+"/, `"version": "${version}"`);
 edit("src-tauri/tauri.conf.json", /"version": "[^"]+"/, `"version": "${version}"`);
 edit("src-tauri/Cargo.toml", /^version = "[^"]+"/m, `version = "${version}"`);
 edit("src/jellyfin.ts", /const VERSION = "[^"]+"/, `const VERSION = "${version}"`);
-console.log(`Finplay is now ${version}. Commit, then: git tag v${version} && git push --follow-tags`);
+console.log(`Finplay is now ${version}. Commit, then: git tag v${version} && git push && git push origin v${version}`);
