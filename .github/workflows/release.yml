@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  MPV_VERSION: v0.41.0
+
 jobs:
   build:
     strategy:
@@ -16,13 +19,23 @@ jobs:
         include:
           - platform: ubuntu-22.04
             args: ""
+            rust-target: ""
+            mpv: ""
           - platform: windows-latest
             args: ""
+            rust-target: ""
+            mpv: x86_64-w64-mingw32
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: "--target aarch64-apple-darwin"
+            rust-target: aarch64-apple-darwin
+            mpv: macos-14-arm
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust-target: x86_64-apple-darwin
+            mpv: macos-15-intel
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -30,18 +43,47 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev rpm
 
-      - uses: actions/setup-node@v4
+      - name: Bundle mpv (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="mpv-$MPV_VERSION-${{ matrix.mpv }}.zip"
+          gh release download "$MPV_VERSION" -R mpv-player/mpv -p "$archive" -D "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"
+          ditto -x -k "$archive" .
+          mkdir -p "$GITHUB_WORKSPACE/src-tauri/mpv"
+          tar -xzf mpv.tar.gz -C "$GITHUB_WORKSPACE/src-tauri/mpv"
+          test -x "$GITHUB_WORKSPACE/src-tauri/mpv/mpv.app/Contents/MacOS/mpv"
+
+      - name: Bundle mpv (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="mpv-$MPV_VERSION-${{ matrix.mpv }}.zip"
+          mkdir -p "$RUNNER_TEMP/mpv"
+          gh release download "$MPV_VERSION" -R mpv-player/mpv -p "$archive" -D "$RUNNER_TEMP/mpv"
+          cd "$RUNNER_TEMP/mpv"
+          7z x -y "$archive" > /dev/null
+          7z x -y mpv-git-*.zip -o"$GITHUB_WORKSPACE/src-tauri/mpv" > /dev/null
+          rm -f "$GITHUB_WORKSPACE"/src-tauri/mpv/*.bat
+          test -f "$GITHUB_WORKSPACE/src-tauri/mpv/mpv.exe"
+
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.rust-target }}
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.rust-target }}
 
       - run: npm ci
 
@@ -54,8 +96,11 @@ jobs:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: Finplay ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseBody: |
-            Finplay needs mpv. On Linux the .deb and .rpm install it for you; with the AppImage, install mpv from your distro.
-            On Windows and macOS, install mpv (for example `winget install mpv` or `brew install mpv`) and set its path in Settings if Finplay can't find it.
+            **Linux:** use the AppImage (updates itself), or the .deb / .rpm, which install mpv for you. With the AppImage, install mpv from your distro.
+            **macOS:** pick `aarch64` for Apple Silicon or `x64` for Intel. mpv is built in. The app isn't notarized, so after dragging it to Applications run `xattr -cr /Applications/Finplay.app` once.
+            **Windows:** mpv is built in. SmartScreen may warn because the installer isn't code-signed; choose More info → Run anyway.
+
+            Windows and macOS builds include [mpv](https://mpv.io) ${{ env.MPV_VERSION }}, which is free software under the GPL/LGPL. Its source is at https://github.com/mpv-player/mpv/tree/${{ env.MPV_VERSION }}.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

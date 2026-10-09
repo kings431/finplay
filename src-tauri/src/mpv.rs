@@ -14,6 +14,36 @@ use crate::awake::KeepAwake;
 use crate::downloads::Downloads;
 use crate::mpris::{Control, Mpris, Track, Update};
 
+/// The mpv to launch. A custom path from Settings wins; the default `mpv`
+/// means the copy bundled with the Windows and macOS builds, then Homebrew's
+/// (macOS apps don't inherit the shell PATH), then whatever is on PATH.
+pub fn mpv_binary(app: &AppHandle, configured: &str) -> String {
+    let configured = configured.trim();
+    if !configured.is_empty() && configured != "mpv" {
+        return configured.to_string();
+    }
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = if cfg!(target_os = "macos") {
+            Some(resources.join("mpv").join("mpv.app").join("Contents").join("MacOS").join("mpv"))
+        } else if cfg!(windows) {
+            Some(resources.join("mpv").join("mpv.exe"))
+        } else {
+            None
+        };
+        if let Some(path) = bundled.filter(|path| path.is_file()) {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    if cfg!(target_os = "macos") {
+        for candidate in ["/opt/homebrew/bin/mpv", "/usr/local/bin/mpv"] {
+            if std::path::Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+    }
+    "mpv".to_string()
+}
+
 pub struct PlayerState {
     inner: Arc<Mutex<Option<Session>>>,
 }
@@ -433,11 +463,7 @@ fn start_player(
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':' | ';'))
         .take(2000)
         .collect();
-    let mpv_path = if request.mpv_path.trim().is_empty() {
-        "mpv".to_string()
-    } else {
-        request.mpv_path.trim().to_string()
-    };
+    let mpv_path = mpv_binary(&app, &request.mpv_path);
 
     let sock = ipc_path();
     #[cfg(unix)]

@@ -50,8 +50,7 @@ pub async fn play_trailer(app: AppHandle, url: String, title: String, mpv_path: 
     let heading = if title.is_empty() { "Trailer".to_string() } else { format!("{title} · Trailer") };
 
     if on_path(&["yt-dlp", "youtube-dl"]) {
-        let mpv = if mpv_path.trim().is_empty() { "mpv".to_string() } else { mpv_path.trim().to_string() };
-        let mut command = Command::new(mpv);
+        let mut command = Command::new(crate::mpv::mpv_binary(&app, &mpv_path));
         command
             .arg("--force-window=immediate")
             .arg(format!("--title={heading}"))

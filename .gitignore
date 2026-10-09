@@ -8,3 +8,6 @@ src-tauri/gen
 # Updater signing keys never belong in the repo
 *.key
 *.key.pub
+
+# mpv is downloaded into the Windows and macOS bundles by CI
+src-tauri/mpv/

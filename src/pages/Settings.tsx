@@ -250,7 +250,7 @@ export function Settings() {
         <div className="setting-row">
           <div>
             <strong>mpv path</strong>
-            <p>The mpv executable. On Linux this is usually just mpv.</p>
+            <p>Leave as mpv to use the player built into Finplay (Windows and macOS) or your system's mpv (Linux). Enter a full path to use a different mpv.</p>
           </div>
           <input value={settings.mpvPath} onChange={(event) => update({ mpvPath: event.target.value })} spellCheck={false} />
         </div>
