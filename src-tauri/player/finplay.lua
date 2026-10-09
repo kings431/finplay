@@ -864,6 +864,17 @@ end
 
 -- Input.
 
+-- Run input/OSD work inside pcall so one bad action (e.g. a menu pick) can
+-- never leave Space / arrows / the overlay dead for the rest of the session.
+local function safe(fn)
+    return function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then
+            mp.msg.error("finplay: " .. tostring(err))
+        end
+    end
+end
+
 local function on_left(event)
     local x, y = mouse_x, mouse_y
     local position = mp.get_property_native("mouse-pos")
@@ -884,7 +895,7 @@ local function on_left(event)
         end
         local button = hit(x, y)
         if button then
-            button.action()
+            pcall(button.action)
         elseif state.menu then
             state.menu = nil
         else
@@ -951,34 +962,35 @@ local function on_escape()
     end
 end
 
-local function key(name, fn)
+local function key(fn)
     return function()
         active()
-        fn()
-        render()
+        -- Always refresh the chrome, even when the action errors.
+        pcall(fn)
+        pcall(render)
     end
 end
 
-mp.add_forced_key_binding("MBTN_LEFT", "finplay-click", on_left, { complex = true })
-mp.add_forced_key_binding("MBTN_LEFT_DBL", "finplay-double", on_double)
-mp.add_forced_key_binding("MOUSE_MOVE", "finplay-move", on_move)
-mp.add_forced_key_binding("WHEEL_UP", "finplay-wheel-up", on_wheel(1))
-mp.add_forced_key_binding("WHEEL_DOWN", "finplay-wheel-down", on_wheel(-1))
-mp.add_forced_key_binding("ESC", "finplay-escape", on_escape)
-mp.add_forced_key_binding("BS", "finplay-back", go_back)
-mp.add_forced_key_binding("f", "finplay-fullscreen", toggle_fullscreen)
-mp.add_forced_key_binding("SPACE", "finplay-pause", key("pause", toggle_pause))
-mp.add_forced_key_binding("LEFT", "finplay-rewind", key("rewind", function() skip(-10) end))
-mp.add_forced_key_binding("RIGHT", "finplay-forward", key("forward", function() skip(10) end))
-mp.add_forced_key_binding("UP", "finplay-volume-up", key("volume-up", function() change_volume(5) end))
-mp.add_forced_key_binding("DOWN", "finplay-volume-down", key("volume-down", function() change_volume(-5) end))
-mp.add_forced_key_binding("a", "finplay-audio", key("audio", function() open_menu("audio") end))
-mp.add_forced_key_binding("s", "finplay-subs", key("subs", function() open_menu("sub") end))
-mp.add_forced_key_binding("c", "finplay-chapters", key("chapters", function() open_menu("chapter") end))
-mp.add_forced_key_binding("[", "finplay-speed-down", key("speed-down", function() nudge_speed(-1) end))
-mp.add_forced_key_binding("]", "finplay-speed-up", key("speed-up", function() nudge_speed(1) end))
+mp.add_forced_key_binding("MBTN_LEFT", "finplay-click", safe(on_left), { complex = true })
+mp.add_forced_key_binding("MBTN_LEFT_DBL", "finplay-double", safe(on_double))
+mp.add_forced_key_binding("MOUSE_MOVE", "finplay-move", safe(on_move))
+mp.add_forced_key_binding("WHEEL_UP", "finplay-wheel-up", safe(on_wheel(1)))
+mp.add_forced_key_binding("WHEEL_DOWN", "finplay-wheel-down", safe(on_wheel(-1)))
+mp.add_forced_key_binding("ESC", "finplay-escape", safe(on_escape))
+mp.add_forced_key_binding("BS", "finplay-back", key(go_back))
+mp.add_forced_key_binding("f", "finplay-fullscreen", key(toggle_fullscreen))
+mp.add_forced_key_binding("SPACE", "finplay-pause", key(toggle_pause))
+mp.add_forced_key_binding("LEFT", "finplay-rewind", key(function() skip(-10) end))
+mp.add_forced_key_binding("RIGHT", "finplay-forward", key(function() skip(10) end))
+mp.add_forced_key_binding("UP", "finplay-volume-up", key(function() change_volume(5) end))
+mp.add_forced_key_binding("DOWN", "finplay-volume-down", key(function() change_volume(-5) end))
+mp.add_forced_key_binding("a", "finplay-audio", key(function() open_menu("audio") end))
+mp.add_forced_key_binding("s", "finplay-subs", key(function() open_menu("sub") end))
+mp.add_forced_key_binding("c", "finplay-chapters", key(function() open_menu("chapter") end))
+mp.add_forced_key_binding("[", "finplay-speed-down", key(function() nudge_speed(-1) end))
+mp.add_forced_key_binding("]", "finplay-speed-up", key(function() nudge_speed(1) end))
 
-mp.add_periodic_timer(0.1, render)
+mp.add_periodic_timer(0.1, safe(render))
 mp.register_event("seek", active)
 mp.observe_property("pause", "bool", function() active() end)
 active()
