@@ -139,7 +139,7 @@ export function Playing() {
             </select>
           </label>
         </div>
-        <p className="keys">Space pause · arrows seek · F fullscreen · Q close · J subtitles</p>
+        <p className="keys">Space pause · arrows seek · ↑↓ volume · A audio · S subtitles · C chapters · [ ] speed · F fullscreen · Backspace close</p>
       </div>
     </div>
   );

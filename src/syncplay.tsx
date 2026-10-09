@@ -46,6 +46,7 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
   const offsetRef = useRef(0);
   const groupRef = useRef<SyncGroup | null>(null);
   const itemRef = useRef("");
+  const sourceRef = useRef<string | undefined>(undefined);
   const loadingRef = useRef(false);
   const expectRef = useRef({ paused: true, position: 0, at: Date.now(), quietUntil: 0 });
   const timersRef = useRef<number[]>([]);
@@ -114,7 +115,8 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
       try {
         await client.sync("Buffering", body(ticks));
         const item = await client.item(entry.ItemId);
-        await playbackRef.current.play(item, { startAt: ticksToSeconds(ticks), returnTo: "/together" });
+        const mediaSourceId = sourceRef.current && sourceRef.current.startsWith(`${entry.ItemId}:`) ? sourceRef.current.slice(entry.ItemId.length + 1) : undefined;
+        await playbackRef.current.play(item, { startAt: ticksToSeconds(ticks), returnTo: "/together", mediaSourceId });
         if (!(await waitForPlayer(item.Id))) throw new Error("The title didn't start in time.");
         await playbackRef.current.setPaused(true);
         expect(true, ticksToSeconds(ticks));
@@ -330,8 +332,9 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
           if (!next) throw new Error("This series has no next episode to start.");
           target = next;
         }
+        sourceRef.current = options?.mediaSourceId ? `${target.Id}:${options.mediaSourceId}` : undefined;
         const percent = target.UserData?.PlayedPercentage ?? 0;
-        const resumeTicks = options?.fromStart || percent > 97 ? 0 : target.UserData?.PlaybackPositionTicks ?? 0;
+        const resumeTicks = options?.fromStart || percent > 97 ? 0 : options?.startAt != null ? secondsToTicks(options.startAt) : target.UserData?.PlaybackPositionTicks ?? 0;
         await client.sync("SetNewQueue", { PlayingQueue: [target.Id], PlayingItemPosition: 0, StartPositionTicks: resumeTicks });
       },
     }),

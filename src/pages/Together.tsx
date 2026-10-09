@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { formatClock, playbackTitle } from "../media";
 import { usePlayback } from "../playback";
 import { useSession } from "../session";
 import { useSyncPlay } from "../syncplay";
@@ -15,7 +16,7 @@ const STATE_LABEL: Record<string, string> = {
 export function Together() {
   const { username } = useSession();
   const together = useSyncPlay();
-  const { active } = usePlayback();
+  const { active, position, duration, paused } = usePlayback();
   const navigate = useNavigate();
   const [groups, setGroups] = useState<SyncGroup[] | null>(null);
   const [name, setName] = useState(`${username}'s room`);
@@ -66,6 +67,25 @@ export function Together() {
           </button>
         </header>
         {error ? <p className="empty error-text">{error}</p> : null}
+        {active ? (
+          <section className="together-card together-now">
+            <h2>Now playing</h2>
+            <p className="together-title">{playbackTitle(active.item)}</p>
+            <p className="fine">
+              {paused ? "Paused" : "Playing"}
+              {duration > 0 ? ` · ${formatClock(position)} / ${formatClock(duration)}` : ""}
+              {active.badge ? ` · ${active.badge}` : ""}
+            </p>
+            <div className="hero-actions">
+              <button className="btn-play" onClick={() => navigate(`/playing/${active.item.Id}`)}>
+                Open player controls
+              </button>
+              <button className="btn-ghost" onClick={() => navigate(`/item/${active.item.Id}`)}>
+                Title details
+              </button>
+            </div>
+          </section>
+        ) : null}
         <section className="together-card">
           <h2>In the room</h2>
           <div className="together-people">
@@ -81,17 +101,13 @@ export function Together() {
         <section className="together-card">
           <h2>How it works</h2>
           <p>Open any movie or episode and press Play. It starts for everyone in the room at the same moment. Pausing or seeking in mpv does the same for the whole group.</p>
-          <div className="hero-actions">
-            {active ? (
-              <button className="btn-play" onClick={() => navigate(`/playing/${active.item.Id}`)}>
-                Back to {active.item.Name}
-              </button>
-            ) : (
+          {!active ? (
+            <div className="hero-actions">
               <button className="btn-play" onClick={() => navigate("/")}>
                 Find something to watch
               </button>
-            )}
-          </div>
+            </div>
+          ) : null}
         </section>
       </div>
     );

@@ -218,6 +218,47 @@ local function icon_fullscreen(cx, cy, u)
     end
 end
 
+local function icon_chapters(cx, cy, u)
+    local w = u * 0.07
+    for index = -1, 1 do
+        local y = cy + index * u * 0.22
+        shape(circle(cx - u * 0.28, y, u * 0.08), "FFFFFF")
+        shape(rrect(cx - u * 0.1, y - w / 2, u * 0.42, w, w / 2), "FFFFFF")
+    end
+end
+
+local function icon_speed(cx, cy, u)
+    outline(circle(cx, cy, u * 0.36), u * 0.07)
+    text(cx, cy + u * 0.02, 5, u * 0.28, "1×", "FFFFFF", "\\b1")
+end
+
+local SPEEDS = { 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 }
+
+local function set_speed(value)
+    mp.set_property_number("speed", value)
+    if value == math.floor(value) then
+        toast(string.format("Speed %dx", value))
+    else
+        toast(string.format("Speed %gx", value))
+    end
+end
+
+local function nudge_speed(direction)
+    local current = mp.get_property_number("speed") or 1
+    local best, distance = SPEEDS[1], math.huge
+    for _, speed in ipairs(SPEEDS) do
+        local gap = math.abs(speed - current)
+        if gap < distance then
+            best, distance = speed, gap
+        end
+    end
+    local index = 1
+    for i, speed in ipairs(SPEEDS) do
+        if speed == best then index = i end
+    end
+    set_speed(SPEEDS[clamp(index + direction, 1, #SPEEDS)])
+end
+
 -- Actions.
 
 local function app_message(name)
@@ -342,28 +383,72 @@ local function round_button(cx, cy, r, draw_icon, action, filled)
     draw_icon(cx, cy, r * 1.05)
 end
 
+local function menu_title(kind)
+    if kind == "sub" then return "Subtitles" end
+    if kind == "audio" then return "Audio" end
+    if kind == "chapter" then return "Chapters" end
+    if kind == "speed" then return "Speed" end
+    return "Menu"
+end
+
+local function menu_rows(kind)
+    local rows = {}
+    if kind == "sub" or kind == "audio" then
+        local list = tracks(kind)
+        if kind == "sub" then
+            local any = false
+            for _, track in ipairs(list) do
+                if track.selected then any = true end
+            end
+            rows[1] = { label = "Off", detail = "", selected = not any, pick = function() mp.set_property("sid", "no") end }
+        end
+        for _, track in ipairs(list) do
+            local id = track.id
+            rows[#rows + 1] = {
+                label = track_label(track),
+                detail = track_detail(track),
+                selected = track.selected,
+                pick = function()
+                    mp.set_property_number(kind == "sub" and "sid" or "aid", id)
+                end,
+            }
+        end
+        return rows, #rows == (kind == "sub" and 1 or 0) and "No tracks in this file" or nil
+    end
+    if kind == "chapter" then
+        local chapters = mp.get_property_native("chapter-list") or {}
+        local current = mp.get_property_number("chapter")
+        for index, chapter in ipairs(chapters) do
+            local at = chapter.time or 0
+            rows[#rows + 1] = {
+                label = (chapter.title and chapter.title ~= "" and chapter.title) or ("Chapter " .. index),
+                detail = format_time(at),
+                selected = current == index - 1,
+                pick = function()
+                    mp.commandv("seek", tostring(at), "absolute")
+                end,
+            }
+        end
+        return rows, #rows == 0 and "No chapters in this file" or nil
+    end
+    if kind == "speed" then
+        local current = mp.get_property_number("speed") or 1
+        for _, speed in ipairs(SPEEDS) do
+            rows[#rows + 1] = {
+                label = speed == 1 and "Normal" or (tostring(speed) .. "×"),
+                detail = "",
+                selected = math.abs(current - speed) < 0.01,
+                pick = function() set_speed(speed) end,
+            }
+        end
+        return rows, nil
+    end
+    return rows, nil
+end
+
 local function draw_menu(pad)
     local kind = state.menu
-    local list = tracks(kind)
-    local rows = {}
-    if kind == "sub" then
-        local any = false
-        for _, track in ipairs(list) do
-            if track.selected then any = true end
-        end
-        rows[1] = { label = "Off", detail = "", selected = not any, pick = function() mp.set_property("sid", "no") end }
-    end
-    for _, track in ipairs(list) do
-        local id = track.id
-        rows[#rows + 1] = {
-            label = track_label(track),
-            detail = track_detail(track),
-            selected = track.selected,
-            pick = function()
-                mp.set_property_number(kind == "sub" and "sid" or "aid", id)
-            end,
-        }
-    end
+    local rows, empty = menu_rows(kind)
 
     local panel_w = math.min(360 * scale, width - pad * 2)
     local x = width - pad - panel_w
@@ -377,13 +462,13 @@ local function draw_menu(pad)
 
     add_button(x, y, panel_w, panel_h, function() end)
     shape(rrect(x, y, panel_w, panel_h, 14 * scale), "161616", "12")
-    text(x + 20 * scale, y + header / 2, 4, 16 * scale, kind == "sub" and "Subtitles" or "Audio", "FFFFFF", "\\b1")
+    text(x + 20 * scale, y + header / 2, 4, 16 * scale, menu_title(kind), "FFFFFF", "\\b1")
     if #rows > shown then
         text(x + panel_w - 20 * scale, y + header / 2, 6, 12 * scale,
             string.format("%d–%d of %d", state.menu_scroll + 1, state.menu_scroll + shown, #rows), "A0A0A8")
     end
     if #rows == 0 then
-        text(x + 20 * scale, y + header + row_h / 2, 4, 14 * scale, "No tracks in this file", "A0A0A8")
+        text(x + 20 * scale, y + header + row_h / 2, 4, 14 * scale, empty or "Nothing here", "A0A0A8")
         return
     end
 
@@ -686,8 +771,10 @@ local function render()
         end
         local right = width - pad - 22 * scale
         round_button(right, top, 22 * scale, icon_fullscreen, toggle_fullscreen, true)
-        round_button(right - 54 * scale, top, 22 * scale, icon_subtitles, function() open_menu("sub") end, true)
-        round_button(right - 108 * scale, top, 22 * scale, icon_audio, function() open_menu("audio") end, true)
+        round_button(right - 54 * scale, top, 22 * scale, icon_speed, function() open_menu("speed") end, true)
+        round_button(right - 108 * scale, top, 22 * scale, icon_chapters, function() open_menu("chapter") end, true)
+        round_button(right - 162 * scale, top, 22 * scale, icon_subtitles, function() open_menu("sub") end, true)
+        round_button(right - 216 * scale, top, 22 * scale, icon_audio, function() open_menu("audio") end, true)
 
         -- Centre transport.
         local cx, cy = width / 2, height / 2
@@ -879,6 +966,9 @@ mp.add_forced_key_binding("UP", "finplay-volume-up", key("volume-up", function()
 mp.add_forced_key_binding("DOWN", "finplay-volume-down", key("volume-down", function() change_volume(-5) end))
 mp.add_forced_key_binding("a", "finplay-audio", key("audio", function() open_menu("audio") end))
 mp.add_forced_key_binding("s", "finplay-subs", key("subs", function() open_menu("sub") end))
+mp.add_forced_key_binding("c", "finplay-chapters", key("chapters", function() open_menu("chapter") end))
+mp.add_forced_key_binding("[", "finplay-speed-down", key("speed-down", function() nudge_speed(-1) end))
+mp.add_forced_key_binding("]", "finplay-speed-up", key("speed-up", function() nudge_speed(1) end))
 
 mp.add_periodic_timer(0.1, render)
 mp.register_event("seek", active)

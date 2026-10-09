@@ -15,8 +15,9 @@ import {
   thumbUrl,
   videoStream,
 } from "../media";
-import { Scroller } from "../components/Cards";
-import { DownloadButton, SeasonDownload } from "../components/DownloadButton";
+import { Poster, Scroller } from "../components/Cards";
+import { DownloadButton, SeasonDownload, UnwatchedDownload } from "../components/DownloadButton";
+import { downloadImage, useDownloads } from "../downloads";
 import { usePlayback, type PlayOptions } from "../playback";
 import { useSyncPlay } from "../syncplay";
 import { invalidate, useCached } from "../cache";
@@ -63,9 +64,12 @@ export function Detail() {
   const { id = "" } = useParams();
   const client = useClient();
   const session = useSession();
+  const downloads = useDownloads();
   const playback = usePlayback();
   const together = useSyncPlay();
   const busy = playback.busy;
+  const offline = session.status === "offline";
+  const local = downloads.find(id);
   const play = (target: BaseItem, options?: PlayOptions) =>
     together.group ? together.playTogether(target, options).catch(() => playback.play(target, options)) : playback.play(target, options);
   const navigate = useNavigate();
@@ -75,19 +79,47 @@ export function Detail() {
   const [favorite, setFavorite] = useState<boolean | undefined>();
   const [played, setPlayed] = useState<Record<string, boolean>>({});
   const [version, setVersion] = useState(0);
+  const [localArt, setLocalArt] = useState<string>();
 
-  const { data, error } = useCached(`item:${id}`, async () => {
+  const { data, error } = useCached(offline ? null : `item:${id}`, async () => {
     const item = await client.item(id);
     const seriesId = item.Type === "Series" ? item.Id : item.Type === "Episode" ? item.SeriesId : undefined;
     const seasons = seriesId ? ((await client.seasons(seriesId)).Items ?? []) : [];
-    return { item, seasons };
+    const children =
+      item.Type === "BoxSet" || item.Type === "CollectionFolder"
+        ? ((await client.items({ parentId: item.Id, recursive: false, sortBy: "SortName", limit: 200 })).Items ?? [])
+        : [];
+    return { item, seasons, children };
   });
-  const item = data?.item;
+  const item = data?.item ?? (local?.state === "done" || local?.state === "downloading" || local?.state === "queued" || local?.state === "failed" ? local.item : undefined);
   const seasons = data?.seasons ?? [];
+  const children = data?.children ?? [];
   const seriesId = item?.Type === "Series" ? item.Id : item?.Type === "Episode" ? item.SeriesId : undefined;
+  const collection = item?.Type === "BoxSet" || item?.Type === "CollectionFolder";
 
-  const nextUp = useCached(item?.Type === "Series" ? `nextup:${item.Id}:${version}` : null, async () =>
+  const nextUp = useCached(!offline && item?.Type === "Series" ? `nextup:${item.Id}:${version}` : null, async () =>
     item ? ((await client.nextUp(item.Id)).Items?.[0] ?? null) : null,
+  ).data;
+
+  const similar = useCached(!offline && item && !collection && (item.Type === "Movie" || item.Type === "Series" || item.Type === "Episode") ? `similar:${item.Type === "Episode" ? item.SeriesId ?? item.Id : item.Id}` : null, async () => {
+    if (!item) return [];
+    const seed = item.Type === "Episode" && item.SeriesId ? item.SeriesId : item.Id;
+    return (await client.similar(seed)).Items ?? [];
+  }).data;
+
+  const unwatched = useCached(!offline && item?.Type === "Series" ? `unwatched:${item.Id}:${version}` : null, async () =>
+    item
+      ? ((
+          await client.items({
+            parentId: item.Id,
+            includeItemTypes: "Episode",
+            filters: "IsUnplayed",
+            recursive: true,
+            sortBy: "ParentIndexNumber,IndexNumber",
+            limit: 400,
+          })
+        ).Items ?? [])
+      : [],
   ).data;
 
   const seasonId =
@@ -98,7 +130,7 @@ export function Detail() {
     "";
   const sourceId = pickedSource || item?.MediaSources?.[0]?.Id || "";
   const episodes =
-    useCached(seriesId && seasonId ? `episodes:${seriesId}:${seasonId}:${version}` : null, async () =>
+    useCached(!offline && seriesId && seasonId ? `episodes:${seriesId}:${seasonId}:${version}` : null, async () =>
       seriesId ? ((await client.episodes(seriesId, seasonId)).Items ?? []) : [],
     ).data ?? [];
 
@@ -108,27 +140,45 @@ export function Detail() {
     setLogoBroken(false);
     setFavorite(undefined);
     setPlayed({});
+    setLocalArt(undefined);
     document.querySelector(".main")?.scrollTo({ top: 0 });
   }, [id]);
 
-  if (error) return <p className="empty">{error}</p>;
-  if (!item) return <div className="detail-hero"><div className="hero-skeleton" /></div>;
+  useEffect(() => {
+    if (!local || (!offline && data?.item)) return;
+    let cancel = false;
+    const kind = local.images.backdrop ? "backdrop" : local.images.still ? "still" : local.images.poster ? "poster" : "";
+    if (!kind) return;
+    void downloadImage(local, kind).then((url) => {
+      if (!cancel) setLocalArt(url);
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [local, offline, data?.item]);
 
-  const backdrop = backdropUrl(session, item);
-  const logo = item.Type === "Episode" ? undefined : logoUrl(session, item);
-  const progress = item.UserData?.PlayedPercentage ?? 0;
+  if (!item && error) return <p className="empty">{error}</p>;
+  if (!item) {
+    if (offline && !local) return <p className="empty">This title isn't downloaded, so it isn't available offline.</p>;
+    return <div className="detail-hero"><div className="hero-skeleton" /></div>;
+  }
+
+  const backdrop = offline || (!data?.item && local) ? localArt : backdropUrl(session, item);
+  const logo = item.Type === "Episode" || offline ? undefined : logoUrl(session, item);
+  const progress = offline && local ? (item.RunTimeTicks ? (local.position / (item.RunTimeTicks / 10_000_000)) * 100 : 0) : (item.UserData?.PlayedPercentage ?? 0);
   const canResume = progress > 1 && progress < 97;
   const isFavorite = favorite ?? item.UserData?.IsFavorite ?? false;
-  const isPlayed = played[item.Id] ?? item.UserData?.Played ?? false;
+  const isPlayed = played[item.Id] ?? (offline && local ? local.played : item.UserData?.Played) ?? false;
   const cast = (item.People ?? []).filter((person) => person.Type === "Actor" || person.Type === "GuestStar").slice(0, 30);
   const crew = (item.People ?? []).filter((person) => CREW_ROLES.includes(person.Type ?? "")).slice(0, 16);
   const sources = item.MediaSources ?? [];
   const source = sources.find((entry) => entry.Id === sourceId) ?? sources[0];
   const season = seasons.find((entry) => entry.Id === seasonId);
   const nextProgress = nextUp?.UserData?.PlayedPercentage ?? 0;
+  const firstChild = children.find((entry) => entry.Type === "Movie" || entry.Type === "Series" || entry.Type === "Episode" || entry.Type === "Video");
 
   async function toggleFavorite() {
-    if (!item) return;
+    if (!item || offline) return;
     const next = !isFavorite;
     setFavorite(next);
     try {
@@ -141,6 +191,7 @@ export function Detail() {
 
   async function markPlayed(target: BaseItem, next: boolean, event?: MouseEvent) {
     event?.stopPropagation();
+    if (offline) return;
     setPlayed((current) => ({ ...current, [target.Id]: next }));
     try {
       await client.setPlayed(target.Id, next);
@@ -159,27 +210,38 @@ export function Detail() {
     item.OfficialRating ? <span key="rating" className="pill">{item.OfficialRating}</span> : null,
     item.CommunityRating ? <span key="stars" className="pill star">★ {item.CommunityRating.toFixed(1)}</span> : null,
     item.CriticRating ? <span key="critic" className="pill critic">{item.CriticRating}%</span> : null,
+    offline && local ? <span key="offline" className="pill">Downloaded · {local.quality}</span> : null,
   ].filter(Boolean);
   const meta = [
     episodeCode(item),
     yearsOf(item),
+    collection && children.length ? `${children.length} titles` : "",
     item.Type === "Series" && seasons.length ? `${seasons.length} ${seasons.length === 1 ? "Season" : "Seasons"}` : "",
-    item.Type !== "Series" ? formatRuntime(item.RunTimeTicks) : "",
-    item.Type !== "Series" && item.RunTimeTicks ? endsAt(item, canResume) : "",
+    item.Type !== "Series" && !collection ? formatRuntime(item.RunTimeTicks) : "",
+    item.Type !== "Series" && !collection && item.RunTimeTicks ? endsAt(item, canResume) : "",
   ].filter(Boolean);
   const facts = factsOf(item, source);
 
   return (
     <article className="detail">
+      {together.group ? (
+        <div className="banner together-banner">
+          <p>
+            Watching together in <strong>{together.group.GroupName}</strong>
+            {together.state ? ` · ${together.state === "Idle" ? "pick something to play" : together.state}` : ""}. Play starts for everyone in the room.
+          </p>
+          <button onClick={() => navigate("/together")}>Room</button>
+        </div>
+      ) : null}
       <div className="detail-hero">
         {backdrop ? <img src={backdrop} alt="" /> : null}
         <div className="hero-shade" />
-        <button className="btn-round back" onClick={() => navigate(-1)} aria-label="Back">
+        <button className="btn-round back" onClick={() => (offline ? navigate("/downloads") : navigate(-1))} aria-label="Back">
           <IconBack size={18} />
         </button>
         <div className="hero-copy">
           {item.SeriesName ? (
-            <button className="eyebrow link" onClick={() => item.SeriesId && navigate(`/item/${item.SeriesId}`)}>
+            <button className="eyebrow link" onClick={() => item.SeriesId && navigate(`/item/${item.SeriesId}`)} disabled={offline}>
               {item.SeriesName}
               {item.SeasonName ? ` · ${item.SeasonName}` : ""}
             </button>
@@ -191,7 +253,14 @@ export function Detail() {
           </div>
           {item.Genres?.length ? <p className="hero-genres">{item.Genres.slice(0, 4).join("  ·  ")}</p> : null}
           <div className="hero-actions">
-            {item.Type === "Series" ? (
+            {collection ? (
+              firstChild ? (
+                <button className="btn-play" disabled={busy} onClick={() => void play(firstChild, { resume: true })}>
+                  <IconPlay size={16} />
+                  {busy ? "Starting…" : `Play ${firstChild.Name}`}
+                </button>
+              ) : null
+            ) : item.Type === "Series" ? (
               <>
                 <button className="btn-play" disabled={busy} onClick={() => void play(nextUp ?? item, { resume: true })}>
                   <IconPlay size={16} />
@@ -205,27 +274,35 @@ export function Detail() {
               </>
             ) : (
               <>
-                <button className="btn-play" disabled={busy} onClick={() => void play(item, { resume: true, mediaSourceId: sourceId || undefined })}>
+                <button
+                  className="btn-play"
+                  disabled={busy || (offline && local?.state !== "done")}
+                  onClick={() => void play(item, { resume: true, mediaSourceId: sourceId || undefined })}
+                >
                   <IconPlay size={16} />
                   {busy ? "Starting…" : canResume ? "Resume" : "Play"}
                 </button>
                 {canResume ? (
-                  <button className="btn-ghost" disabled={busy} onClick={() => void play(item, { fromStart: true, mediaSourceId: sourceId || undefined })}>
+                  <button className="btn-ghost" disabled={busy || (offline && local?.state !== "done")} onClick={() => void play(item, { fromStart: true, mediaSourceId: sourceId || undefined })}>
                     Play from start
                   </button>
                 ) : null}
               </>
             )}
-            <button className={`btn-round ${isFavorite ? "on-heart" : ""}`} onClick={() => void toggleFavorite()} aria-label="Favorite" title={isFavorite ? "Remove from favorites" : "Add to favorites"}>
-              <IconHeart size={19} filled={isFavorite} />
-            </button>
-            <button className={`btn-round ${isPlayed ? "on-check" : ""}`} onClick={() => void markPlayed(item, !isPlayed)} aria-label="Watched" title={isPlayed ? "Mark unwatched" : "Mark watched"}>
-              <IconCheck size={19} />
-            </button>
-            {item.Type === "Movie" || item.Type === "Episode" ? <DownloadButton item={item} /> : null}
-            <TrailerButton item={item} />
+            {!offline ? (
+              <>
+                <button className={`btn-round ${isFavorite ? "on-heart" : ""}`} onClick={() => void toggleFavorite()} aria-label="Favorite" title={isFavorite ? "Remove from favorites" : "Add to favorites"}>
+                  <IconHeart size={19} filled={isFavorite} />
+                </button>
+                <button className={`btn-round ${isPlayed ? "on-check" : ""}`} onClick={() => void markPlayed(item, !isPlayed)} aria-label="Watched" title={isPlayed ? "Mark unwatched" : "Mark watched"}>
+                  <IconCheck size={19} />
+                </button>
+                {item.Type === "Movie" || item.Type === "Episode" ? <DownloadButton item={item} mediaSourceId={sourceId || undefined} /> : null}
+                <TrailerButton item={item} />
+              </>
+            ) : null}
           </div>
-          {sources.length > 1 ? (
+          {!offline && sources.length > 1 ? (
             <label className="version">
               Version
               <select value={sourceId} onChange={(event) => setPickedSource(event.target.value)}>
@@ -304,6 +381,7 @@ export function Detail() {
             </h3>
             <div className="episodes-actions">
               <SeasonDownload episodes={episodes} />
+              {item.Type === "Series" && unwatched && unwatched.length > 0 ? <UnwatchedDownload episodes={unwatched} /> : null}
               {season ? (
                 <button className="btn-ghost" onClick={() => void markPlayed(season, !(played[season.Id] ?? season.UserData?.Played))}>
                   <IconCheck size={15} />
@@ -325,6 +403,28 @@ export function Detail() {
               />
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {children.length > 0 ? (
+        <section className="detail-section">
+          <h2>{item.Type === "BoxSet" ? "In this collection" : "Titles"}</h2>
+          <Scroller>
+            {children.map((entry) => (
+              <Poster key={entry.Id} item={entry} />
+            ))}
+          </Scroller>
+        </section>
+      ) : null}
+
+      {similar && similar.length > 0 ? (
+        <section className="detail-section">
+          <h2>More like this</h2>
+          <Scroller>
+            {similar.map((entry) => (
+              <Poster key={entry.Id} item={entry} />
+            ))}
+          </Scroller>
         </section>
       ) : null}
 

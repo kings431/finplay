@@ -8,11 +8,11 @@ function percent(received: number, total: number) {
   return total > 0 ? Math.min(99, Math.floor((received / total) * 100)) : 0;
 }
 
-function QualityList({ item, onPick }: { item?: BaseItem; onPick: (quality: Quality) => void }) {
+function QualityList({ item, mediaSourceId, onPick }: { item?: BaseItem; mediaSourceId?: string; onPick: (quality: Quality) => void }) {
   return (
     <>
       {QUALITIES.map((quality) => {
-        const size = item ? estimateSize(item, quality) : 0;
+        const size = item ? estimateSize(item, quality, mediaSourceId) : 0;
         return (
           <button key={quality.id} className="menu-row" onClick={() => onPick(quality)}>
             <span>{quality.label}</span>
@@ -25,7 +25,7 @@ function QualityList({ item, onPick }: { item?: BaseItem; onPick: (quality: Qual
 }
 
 /** Download control for one movie or episode. */
-export function DownloadButton({ item }: { item: BaseItem }) {
+export function DownloadButton({ item, mediaSourceId }: { item: BaseItem; mediaSourceId?: string }) {
   const { find, start, remove } = useDownloads();
   const entry = find(item.Id);
   const [open, setOpen] = useState(false);
@@ -39,7 +39,7 @@ export function DownloadButton({ item }: { item: BaseItem }) {
     setOpen(false);
     setError("");
     try {
-      await start(item, quality, retry);
+      await start(item, quality, { retry, mediaSourceId });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setOpen(true);
@@ -92,7 +92,7 @@ export function DownloadButton({ item }: { item: BaseItem }) {
                 </>
               ) : null}
               <p className="menu-head">Download for offline</p>
-              <QualityList item={item} onPick={(quality) => void pick(quality)} />
+              <QualityList item={item} mediaSourceId={mediaSourceId} onPick={(quality) => void pick(quality)} />
             </>
           )}
         </Popover>
@@ -165,6 +165,52 @@ export function SeasonDownload({ episodes }: { episodes: BaseItem[] }) {
               {activeCount > 0 ? "Cancel and delete season downloads" : "Delete season downloads"}
             </button>
           ) : null}
+        </Popover>
+      ) : null}
+    </>
+  );
+}
+
+/** Queues unwatched episodes that are not already downloaded — for travel binge packs. */
+export function UnwatchedDownload({ episodes }: { episodes: BaseItem[] }) {
+  const { find, start } = useDownloads();
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLButtonElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const [error, setError] = useState("");
+  const missing = episodes.filter((episode) => {
+    const entry = find(episode.Id);
+    return !entry || entry.state === "failed";
+  });
+  if (missing.length === 0) return null;
+
+  async function pick(quality: Quality) {
+    setOpen(false);
+    setError("");
+    for (const episode of missing) {
+      try {
+        await start(episode, quality);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setOpen(true);
+        return;
+      }
+    }
+  }
+
+  return (
+    <>
+      <button ref={anchor} className="btn-ghost" onClick={() => setOpen((value) => !value)}>
+        <IconDownload size={15} />
+        Download unwatched
+      </button>
+      {open ? (
+        <Popover anchorRef={anchor} align="end" onClose={close}>
+          {error ? <p className="menu-error">{error}</p> : null}
+          <p className="menu-head">
+            Queue {missing.length} unwatched episode{missing.length === 1 ? "" : "s"}
+          </p>
+          <QualityList onPick={(quality) => void pick(quality)} />
         </Popover>
       ) : null}
     </>

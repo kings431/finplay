@@ -105,6 +105,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   const activeRef = useRef<ActivePlayback | null>(null);
   const positionRef = useRef(0);
+  const volumeRef = useRef({ volume: 100, muted: false, rate: 1 });
   const stopSent = useRef(false);
   const navigateRef = useRef(navigate);
   const trickplayRef = useRef<TrickplayRenderer | null>(null);
@@ -118,6 +119,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     async (playback: ActivePlayback, event: "start" | "progress" | "stop", seconds: number, isPaused: boolean) => {
       if (!client) return false;
       const ticks = playback.baseTicks + secondsToTicks(Math.max(0, seconds));
+      const { volume, muted, rate } = volumeRef.current;
       try {
         await client.report(event, {
           ItemId: playback.item.Id,
@@ -127,9 +129,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           PositionTicks: ticks,
           CanSeek: true,
           IsPaused: isPaused,
-          IsMuted: false,
-          VolumeLevel: 100,
-          PlaybackRate: 1,
+          IsMuted: muted,
+          VolumeLevel: Math.round(Math.min(100, Math.max(0, muted ? 0 : volume))),
+          PlaybackRate: rate,
           PlayMethod: playback.method,
           RepeatMode: "RepeatNone",
           PlaybackOrder: "Default",
@@ -189,6 +191,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         return;
       }
       positionRef.current = event.time || 0;
+      if (typeof event.volume === "number") volumeRef.current.volume = event.volume;
+      if (typeof event.muted === "boolean") volumeRef.current.muted = event.muted;
+      if (typeof event.rate === "number" && event.rate > 0) volumeRef.current.rate = event.rate;
       setPosition(event.time || 0);
       setDuration(event.duration || 0);
       setPaused(event.paused);
@@ -268,6 +273,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         setPaused(false);
         setFinished(false);
         try {
+          volumeRef.current = { volume: 100, muted: false, rate: settings.playbackSpeed || 1 };
           await playerPlay({
             url: media.url,
             downloadId: media.downloadId,
@@ -277,6 +283,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             audioLang: settings.audioLanguage,
             subtitleLang: settings.subtitleLanguage,
             subtitlesEnabled: settings.subtitlesEnabled,
+            subtitleScale: settings.subtitleScale,
+            subtitleColor: settings.subtitleColor,
+            subtitleFont: settings.subtitleFont,
+            playbackSpeed: settings.playbackSpeed,
             mpvPath: settings.mpvPath,
             badge: playback.badge,
             trickplay: media.trickplay,

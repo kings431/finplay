@@ -228,6 +228,19 @@ export function Settings() {
         </div>
         <div className="setting-row">
           <div>
+            <strong>Playback speed</strong>
+            <p>Used when a title starts. You can still change speed in the player with [ and ].</p>
+          </div>
+          <select value={settings.playbackSpeed} onChange={(event) => update({ playbackSpeed: Number(event.target.value) })}>
+            {[0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
+              <option key={speed} value={speed}>
+                {speed === 1 ? "Normal" : `${speed}×`}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="setting-row">
+          <div>
             <strong>Subtitles</strong>
             <p>Off keeps image subtitles from being burned in. You can still turn them on in the player.</p>
           </div>
@@ -239,6 +252,38 @@ export function Settings() {
             <p>Used when subtitles are on. Example: eng</p>
           </div>
           <input value={settings.subtitleLanguage} onChange={(event) => update({ subtitleLanguage: event.target.value })} />
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Subtitle size</strong>
+            <p>Bigger helps on a living-room TV. Applies the next time you play something.</p>
+          </div>
+          <select value={settings.subtitleScale} onChange={(event) => update({ subtitleScale: Number(event.target.value) })}>
+            {[0.8, 1, 1.2, 1.5, 2].map((scale) => (
+              <option key={scale} value={scale}>
+                {scale === 1 ? "Normal" : `${scale}×`}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Subtitle color</strong>
+            <p>High-contrast yellow is often easier to read than white.</p>
+          </div>
+          <select value={settings.subtitleColor} onChange={(event) => update({ subtitleColor: event.target.value })}>
+            <option value="white">White</option>
+            <option value="yellow">Yellow</option>
+            <option value="cyan">Cyan</option>
+            <option value="lime">Lime</option>
+          </select>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Subtitle font</strong>
+            <p>Leave blank for mpv's default. Examples: sans-serif, serif, monospace.</p>
+          </div>
+          <input value={settings.subtitleFont} onChange={(event) => update({ subtitleFont: event.target.value })} placeholder="sans-serif" />
         </div>
         <div className="setting-row">
           <div>

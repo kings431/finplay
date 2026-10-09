@@ -621,7 +621,10 @@ button.nav-btn { border: 0; background: none; }
 .guide-loading { position: absolute; inset: 4px; border-radius: 9px; background: rgb(var(--fg-rgb) / 0.04); }
 .guide-now { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 1; pointer-events: none; }
 
+.together-banner { margin: 0 56px 0; }
+.together-banner strong { font-weight: 650; }
 .together-card { margin: 0 56px 18px; padding: 20px 22px; border-radius: 18px; background: rgb(var(--fg-rgb) / 0.05); max-width: 760px; }
+.together-now .together-title { margin: 0 0 4px; font-size: 20px; font-weight: 650; }
 .together-card h2 { margin: 0 0 12px; font-size: 17px; }
 .together-card p { margin: 0 0 14px; color: var(--muted); line-height: 1.5; }
 .together-create .inline-form input { flex: 1; height: 42px; border-radius: 12px; border: 1px solid var(--line); background: var(--field); color: var(--fg); padding: 0 14px; outline: none; }
@@ -1218,7 +1221,7 @@ button.nav-btn { border: 0; background: none; }
 .download-art:hover .download-play { opacity: 1; }
 .download-watched { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.25); }
 .download-watched span { display: block; height: 100%; background: var(--accent); }
-.download-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.download-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; cursor: pointer; }
 .download-copy .eyebrow { margin: 0; font-size: 11px; }
 .download-copy strong { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .download-copy small { color: var(--muted); font-size: 13px; }

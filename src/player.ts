@@ -10,6 +10,10 @@ export type PlayRequest = {
   audioLang: string;
   subtitleLang: string;
   subtitlesEnabled: boolean;
+  subtitleScale: number;
+  subtitleColor: string;
+  subtitleFont: string;
+  playbackSpeed: number;
   mpvPath: string;
   badge: string;
   trickplay: boolean;

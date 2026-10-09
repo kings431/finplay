@@ -11,6 +11,7 @@ use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -189,6 +190,13 @@ const NS_WINDOW_ABOVE: isize = 1;
 /// (player NSWindow, Finplay NSWindow) while the player is attached.
 /// Only touched on the main thread, as AppKit requires.
 static ATTACHED: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+/// Player window waiting to be (re)attached after a Spaces fullscreen transition.
+static PENDING: Mutex<Option<usize>> = Mutex::new(None);
+/// When set, `attach` only remembers the player — Spaces fullscreen must finish
+/// before the child window is added, or AppKit can lock up the session.
+static DEFER_ATTACH: AtomicBool = AtomicBool::new(false);
+/// Bumps when a fullscreen transition is scheduled so older timers are ignored.
+static FS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn host_window(app: &AppHandle) -> Option<usize> {
     let window = app.get_webview_window("main")?;
@@ -206,19 +214,45 @@ fn window_id(api: &Api, raw: *mut c_void) -> Option<usize> {
     text.trim().parse::<i64>().ok().filter(|id| *id != 0).map(|id| id as usize)
 }
 
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.5
+}
+
+fn rect_near(a: Rect, b: Rect) -> bool {
+    near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height)
+}
+
 /// Lays the player window over the host's content area.
+/// Exact f64 equality is avoided: AppKit often returns a slightly different
+/// frame after `setFrame`, which would resize forever and can lock the session
+/// when the host is fullscreen.
 unsafe fn place(player: usize, host: usize) {
     let (player, host) = (player as *mut AnyObject, host as *mut AnyObject);
     let frame: Rect = msg_send![host, frame];
     let content: Rect = msg_send![host, contentRectForFrameRect: frame];
     let current: Rect = msg_send![player, frame];
-    if current != content {
+    if !rect_near(current, content) {
         let _: () = msg_send![player, setFrame: content, display: true];
     }
 }
 
+fn remove_child(player: usize, host: usize) {
+    unsafe {
+        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
+        let _: () = msg_send![parent, removeChildWindow: window];
+    }
+}
+
 fn attach(app: &AppHandle, player: usize) {
-    let Some(host) = host_window(app) else { return };
+    if DEFER_ATTACH.load(Ordering::SeqCst) {
+        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
+        return;
+    }
+    let Some(host) = host_window(app) else {
+        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
+        return;
+    };
+    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     // AppKit may send window events synchronously; never hold the lock across it.
     let fresh = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host)) != Some((player, host));
     unsafe {
@@ -233,18 +267,62 @@ fn attach(app: &AppHandle, player: usize) {
 }
 
 fn detach() {
+    DEFER_ATTACH.store(false, Ordering::SeqCst);
+    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     let Some((player, host)) = attached else { return };
     unsafe {
-        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
-        let _: () = msg_send![parent, removeChildWindow: window];
+        remove_child(player, host);
+        let parent = host as *mut AnyObject;
         let _: () = msg_send![parent, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
     }
+}
+
+/// Detaches the player for a Spaces fullscreen transition. The window id is
+/// kept so it can be re-added once the host is in (or out of) the new Space.
+pub fn suspend_for_fullscreen() {
+    DEFER_ATTACH.store(true, Ordering::SeqCst);
+    let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    if let Some((player, host)) = attached {
+        remove_child(player, host);
+        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
+    }
+}
+
+/// Re-attaches a player that was deferred or suspended around fullscreen.
+pub fn resume_after_fullscreen(app: &AppHandle) {
+    DEFER_ATTACH.store(false, Ordering::SeqCst);
+    let player = PENDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+        .or_else(|| ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).map(|(player, _)| player));
+    if let Some(player) = player {
+        attach(app, player);
+    }
+}
+
+/// Runs `resume_after_fullscreen` after Spaces finishes animating. Newer calls
+/// cancel older timers so rapid toggles do not reattach mid-transition.
+pub fn schedule_resume_after_fullscreen(app: AppHandle) {
+    let generation = FS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        // Lion+ Spaces fullscreen animation is about half a second.
+        std::thread::sleep(Duration::from_millis(850));
+        if FS_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || resume_after_fullscreen(&handle));
+    });
 }
 
 /// Keeps the player covering Finplay's content after the window moves,
 /// resizes or changes fullscreen. Call on the main thread.
 pub fn follow_host() {
+    if DEFER_ATTACH.load(Ordering::SeqCst) {
+        return;
+    }
     let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some((player, host)) = attached {
         unsafe { place(player, host) };

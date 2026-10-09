@@ -98,7 +98,6 @@ function back() {
 
 function onKey(event: KeyboardEvent) {
   if (!enabled || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
-  if (window.location.hash.startsWith("#/playing/") && !document.querySelector(".menu-pop, .sheet-backdrop")) return;
   const target = event.target as HTMLElement | null;
   const typing = target instanceof HTMLInputElement ? TEXT_INPUT.test(target.type) : target instanceof HTMLTextAreaElement;
   const selecting = target instanceof HTMLSelectElement;

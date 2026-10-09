@@ -36,8 +36,8 @@ export const QUALITIES: Quality[] = [
 
 const AUDIO_BITRATE = 192_000;
 
-export function estimateSize(item: BaseItem, quality: Quality) {
-  const source = item.MediaSources?.[0];
+export function estimateSize(item: BaseItem, quality: Quality, mediaSourceId?: string) {
+  const source = item.MediaSources?.find((entry) => entry.Id === mediaSourceId) ?? item.MediaSources?.[0];
   if (!quality.bitrate) return source?.Size ?? 0;
   const seconds = ticksToSeconds(item.RunTimeTicks ?? source?.RunTimeTicks);
   const estimate = ((quality.bitrate + AUDIO_BITRATE) * seconds) / 8;
@@ -85,7 +85,7 @@ function slim(item: BaseItem): BaseItem {
 type DownloadsValue = {
   entries: DownloadEntry[];
   find: (id: string) => DownloadEntry | undefined;
-  start: (item: BaseItem, quality: Quality, retry?: boolean) => Promise<void>;
+  start: (item: BaseItem, quality: Quality, options?: { retry?: boolean; mediaSourceId?: string }) => Promise<void>;
   remove: (id: string) => Promise<void>;
   saveProgress: (id: string, position: number, played: boolean, dirty: boolean) => void;
   folder: string;
@@ -163,15 +163,16 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   }, [client, entries, saveProgress, status]);
 
   const start = useCallback(
-    async (item: BaseItem, quality: Quality, retry = false) => {
+    async (item: BaseItem, quality: Quality, options: { retry?: boolean; mediaSourceId?: string } = {}) => {
       if (!client) throw new Error("Sign in to download.");
       const full = item.MediaSources?.length ? item : await client.item(item.Id);
-      const source = full.MediaSources?.[0];
+      const source = full.MediaSources?.find((entry) => entry.Id === options.mediaSourceId) ?? full.MediaSources?.[0];
       if (!source) throw new Error("Jellyfin did not return a file for this item.");
+      const slimItem = slim({ ...full, MediaSources: [source] });
       let url: string;
       let extension: string;
       if (!quality.height) {
-        const params = new URLSearchParams({ ApiKey: token });
+        const params = new URLSearchParams({ ApiKey: token, mediaSourceId: source.Id });
         url = `${server}/Items/${full.Id}/Download?${params}`;
         extension = (source.Path?.split(".").pop() || source.Container?.split(",")[0] || "mkv").toLowerCase();
       } else {
@@ -200,13 +201,13 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       await call("download_start", {
         request: {
           id: full.Id,
-          item: slim(full),
+          item: slimItem,
           quality: quality.id,
           url,
           extension,
           images,
-          expectedSize: Math.round(estimateSize(full, quality)),
-          resumable: retry && !quality.height,
+          expectedSize: Math.round(estimateSize(full, quality, source.Id)),
+          resumable: Boolean(options.retry) && !quality.height,
           duration: quality.height ? ticksToSeconds(full.RunTimeTicks ?? source.RunTimeTicks) : 0,
         },
       });

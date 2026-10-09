@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { downloadImage, formatBytes, formatEta, QUALITIES, useDownloads, type DownloadEntry } from "../downloads";
 import { IconPlay } from "../icons";
 import { episodeCode, formatRuntime, tile } from "../media";
@@ -25,6 +26,7 @@ function useLocalImage(entry: DownloadEntry, kinds: string[]) {
 function DownloadRow({ entry }: { entry: DownloadEntry }) {
   const { start, remove } = useDownloads();
   const { play, busy } = usePlayback();
+  const navigate = useNavigate();
   const [error, setError] = useState("");
   const art = useLocalImage(entry, ["still", "backdrop", "poster"]);
   const { item } = entry;
@@ -36,7 +38,7 @@ function DownloadRow({ entry }: { entry: DownloadEntry }) {
   async function retry() {
     setError("");
     try {
-      await start(item, QUALITIES.find((quality) => quality.id === entry.quality) ?? QUALITIES[0], true);
+      await start(item, QUALITIES.find((quality) => quality.id === entry.quality) ?? QUALITIES[0], { retry: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -78,7 +80,7 @@ function DownloadRow({ entry }: { entry: DownloadEntry }) {
           </span>
         ) : null}
       </button>
-      <div className="download-copy">
+      <div className="download-copy" role="button" tabIndex={0} onClick={() => navigate(`/item/${item.Id}`)} onKeyDown={(event) => event.key === "Enter" && navigate(`/item/${item.Id}`)}>
         {item.SeriesName ? <p className="eyebrow">{[item.SeriesName, episodeCode(item)].filter(Boolean).join(" · ")}</p> : null}
         <strong>{item.Name}</strong>
         <small className={entry.state === "failed" ? "error-text" : ""}>{error || status}</small>

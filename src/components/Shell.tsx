@@ -9,7 +9,7 @@ import { useSyncPlay } from "../syncplay";
 import { Popover } from "./Popover";
 import { UpdateBanner } from "./UpdateBanner";
 
-const OFFLINE_PATHS = ["/downloads", "/settings", "/playing/"];
+const OFFLINE_PATHS = ["/downloads", "/settings", "/playing/", "/item/"];
 
 function ProfileMenu({ avatar }: { avatar?: string }) {
   const { username, server, userId, accounts, switchTo, addAccount, logout } = useSession();

@@ -112,6 +112,9 @@ struct PlayerEvent {
     reason: String,
     detail: String,
     embedded: bool,
+    volume: f64,
+    muted: bool,
+    rate: f64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -124,6 +127,14 @@ pub struct PlayRequest {
     audio_lang: String,
     subtitle_lang: String,
     subtitles_enabled: bool,
+    #[serde(default = "default_one")]
+    subtitle_scale: f64,
+    #[serde(default)]
+    subtitle_color: String,
+    #[serde(default)]
+    subtitle_font: String,
+    #[serde(default = "default_one")]
+    playback_speed: f64,
     mpv_path: String,
     badge: String,
     #[serde(default)]
@@ -143,6 +154,10 @@ pub struct PlayRequest {
     download_id: String,
 }
 
+fn default_one() -> f64 {
+    1.0
+}
+
 #[derive(Clone, Serialize)]
 struct ThumbRequest {
     time: f64,
@@ -155,6 +170,9 @@ struct PlaybackProbe {
     paused: bool,
     ended: bool,
     reason: String,
+    volume: f64,
+    muted: bool,
+    rate: f64,
 }
 
 impl PlayerState {
@@ -233,7 +251,7 @@ fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 fn restore_window(shared: &Shared) {
     if shared.made_fullscreen.swap(false, Ordering::SeqCst) {
         if let Some(window) = main_window(&shared.app) {
-            let _ = window.set_fullscreen(false);
+            apply_host_fullscreen(&window, false);
         }
     }
 }
@@ -244,15 +262,38 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
 }
 
+/// Applies host-window fullscreen. On macOS, Spaces fullscreen is kept (new
+/// desktop, like other Mac players), but the libmpv child window is detached
+/// for the transition — attaching during the animation can lock up the session.
+fn apply_host_fullscreen(window: &WebviewWindow, on: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::libmpv::suspend_for_fullscreen();
+        let ok = window.set_fullscreen(on).is_ok();
+        crate::libmpv::schedule_resume_after_fullscreen(window.app_handle().clone());
+        ok
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_fullscreen(on).is_ok()
+    }
+}
+
+fn host_is_fullscreen(window: &WebviewWindow, made: bool) -> bool {
+    made || window.is_fullscreen().unwrap_or(false)
+}
+
 fn toggle_fullscreen(shared: &Arc<Shared>) {
     if shared.handoff || (shared.embedded && wayland_session()) {
         switch_mode(shared);
         return;
     }
     if let Some(window) = main_window(&shared.app) {
-        let next = !window.is_fullscreen().unwrap_or(false);
-        let _ = window.set_fullscreen(next);
-        shared.made_fullscreen.store(next, Ordering::SeqCst);
+        let made = shared.made_fullscreen.load(Ordering::SeqCst);
+        let next = !host_is_fullscreen(&window, made);
+        if apply_host_fullscreen(&window, next) {
+            shared.made_fullscreen.store(next, Ordering::SeqCst);
+        }
     }
 }
 
@@ -300,6 +341,9 @@ fn switch_mode(shared: &Arc<Shared>) {
                     reason: "error".into(),
                     detail: err,
                     embedded: false,
+                    volume: 100.0,
+                    muted: false,
+                    rate: 1.0,
                 },
             );
         }
@@ -311,9 +355,8 @@ fn escape(shared: &Arc<Shared>) {
         switch_mode(shared);
         return;
     }
-    let fullscreen = main_window(&shared.app)
-        .and_then(|window| window.is_fullscreen().ok())
-        .unwrap_or(false);
+    let made = shared.made_fullscreen.load(Ordering::SeqCst);
+    let fullscreen = main_window(&shared.app).is_some_and(|window| host_is_fullscreen(&window, made));
     if fullscreen {
         toggle_fullscreen(shared);
     } else {
@@ -554,8 +597,9 @@ fn start_player(
         }
         if request.fullscreen {
             if let Some(window) = main_window(&app) {
-                made_fullscreen = !window.is_fullscreen().unwrap_or(false)
-                    && window.set_fullscreen(true).is_ok();
+                // Prefer simple fullscreen on macOS; Spaces fullscreen with the
+                // libmpv child window has locked up the whole session.
+                made_fullscreen = apply_host_fullscreen(&window, true);
             }
         }
     }
@@ -573,6 +617,34 @@ fn start_player(
         args.push(format!("--slang={}", request.subtitle_lang.trim()));
     } else if !request.subtitles_enabled {
         args.push("--sid=no".into());
+    }
+    let scale = if request.subtitle_scale.is_finite() {
+        request.subtitle_scale.clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    if (scale - 1.0).abs() > 0.01 {
+        args.push(format!("--sub-scale={scale}"));
+    }
+    if let Some(color) = sub_color(&request.subtitle_color) {
+        args.push(format!("--sub-color={color}"));
+    }
+    let font: String = request
+        .subtitle_font
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ' '))
+        .take(64)
+        .collect();
+    if !font.trim().is_empty() {
+        args.push(format!("--sub-font={}", font.trim()));
+    }
+    let speed = if request.playback_speed.is_finite() {
+        request.playback_speed.clamp(0.25, 3.0)
+    } else {
+        1.0
+    };
+    if (speed - 1.0).abs() > 0.01 {
+        args.push(format!("--speed={speed}"));
     }
     args.extend(carry);
     args.push("--".into());
@@ -621,7 +693,7 @@ fn start_player(
             child.terminate();
             if made_fullscreen {
                 if let Some(window) = main_window(&app) {
-                    let _ = window.set_fullscreen(false);
+                    apply_host_fullscreen(&window, false);
                 }
             }
             return Err(err);
@@ -653,7 +725,15 @@ fn start_player(
     let reader_app = app.clone();
     thread::spawn(move || read_loop(reader_app, reader_shared, reader));
 
-    for (id, name) in [(1u64, "time-pos"), (2, "duration"), (3, "pause"), (4, "eof-reached")] {
+    for (id, name) in [
+        (1u64, "time-pos"),
+        (2, "duration"),
+        (3, "pause"),
+        (4, "eof-reached"),
+        (5, "volume"),
+        (6, "mute"),
+        (7, "speed"),
+    ] {
         let _ = send_command(
             &shared,
             vec![json!("observe_property"), json!(id), json!(name)],
@@ -690,9 +770,22 @@ fn start_player(
             reason: String::new(),
             detail: String::new(),
             embedded: wid.is_some(),
+            volume: 100.0,
+            muted: false,
+            rate: speed,
         },
     );
     Ok(())
+}
+
+fn sub_color(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "" | "white" => None,
+        "yellow" => Some("#FFFF00"),
+        "cyan" => Some("#00FFFF"),
+        "lime" | "green" => Some("#00FF00"),
+        _ => None,
+    }
 }
 
 fn connect_ipc(
@@ -750,6 +843,9 @@ fn read_loop(app: AppHandle, shared: Arc<Shared>, mut reader: BufReader<Box<dyn 
         paused: false,
         ended: false,
         reason: String::new(),
+        volume: 100.0,
+        muted: false,
+        rate: 1.0,
     };
     let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
     let mut kept_awake = true;
@@ -825,6 +921,9 @@ fn apply_message(line: &str, probe: &mut PlaybackProbe) -> bool {
                 "time-pos" => probe.time = data.and_then(Value::as_f64).unwrap_or(probe.time),
                 "duration" => probe.duration = data.and_then(Value::as_f64).unwrap_or(0.0),
                 "pause" => probe.paused = data.and_then(Value::as_bool).unwrap_or(false),
+                "volume" => probe.volume = data.and_then(Value::as_f64).unwrap_or(probe.volume),
+                "mute" => probe.muted = data.and_then(Value::as_bool).unwrap_or(false),
+                "speed" => probe.rate = data.and_then(Value::as_f64).unwrap_or(probe.rate),
                 "eof-reached" => {
                     probe.ended = data.and_then(Value::as_bool).unwrap_or(false);
                     if probe.ended && probe.reason.is_empty() {
@@ -874,6 +973,9 @@ fn emit_status(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe) {
             reason: probe.reason.clone(),
             detail,
             embedded: shared.embedded,
+            volume: probe.volume,
+            muted: probe.muted,
+            rate: probe.rate,
         },
     );
 }
@@ -901,6 +1003,9 @@ fn emit_closed(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe, reason: 
             reason: reason.into(),
             detail: String::new(),
             embedded: shared.embedded,
+            volume: probe.volume,
+            muted: probe.muted,
+            rate: probe.rate,
         },
     );
 }

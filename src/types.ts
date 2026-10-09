@@ -200,6 +200,9 @@ export type PlayerEvent = {
   reason: string;
   detail: string;
   embedded: boolean;
+  volume: number;
+  muted: boolean;
+  rate: number;
 };
 
 export type MpvTrack = {
@@ -237,10 +240,18 @@ export type Settings = {
   audioLanguage: string;
   subtitleLanguage: string;
   subtitlesEnabled: boolean;
+  /** mpv sub-scale; 1 is default size. */
+  subtitleScale: number;
+  /** CSS-like name mapped to an mpv color, e.g. white or yellow. */
+  subtitleColor: string;
+  /** Empty uses mpv's default font. */
+  subtitleFont: string;
   maxBitrate: number;
   mpvPath: string;
   autoplayNext: boolean;
   autoSkipIntro: boolean;
+  /** Default playback rate when a title starts. */
+  playbackSpeed: number;
   streamystatsUrl: string;
   couchMode: boolean;
 };
@@ -251,11 +262,15 @@ export const DEFAULT_SETTINGS: Settings = {
   audioLanguage: "",
   subtitleLanguage: "eng",
   subtitlesEnabled: false,
+  subtitleScale: 1,
+  subtitleColor: "white",
+  subtitleFont: "",
   maxBitrate: 1_000_000_000,
   mpvPath: "mpv",
   couchMode: false,
   autoplayNext: true,
   autoSkipIntro: false,
+  playbackSpeed: 1,
   streamystatsUrl: "",
 };
 
