@@ -64,6 +64,10 @@ impl Engine {
         }
     }
 
+    fn running(&mut self) -> bool {
+        self.exit_status().ok().flatten().is_none()
+    }
+
     fn terminate(&mut self) {
         match self {
             Engine::Process(child) => {
@@ -201,6 +205,15 @@ pub async fn player_play(
     let inner = Arc::clone(&state.inner);
     tauri::async_runtime::spawn_blocking(move || {
         let mut request = request;
+        // mpv may quit on its own while the session entry lingers; don't treat
+        // that stale handoff flag as "user still wants fullscreen".
+        let stale = {
+            let mut guard = lock(&inner);
+            guard.as_mut().is_some_and(|session| !session.child.running())
+        };
+        if stale {
+            stop_player(&inner);
+        }
         let was_fullscreen = lock(&inner).as_ref().is_some_and(|session| {
             session.shared.handoff || session.shared.made_fullscreen.load(Ordering::SeqCst)
         });
@@ -335,10 +348,13 @@ fn switch_mode(shared: &Arc<Shared>) {
                 },
             );
         }
+        shared.switching.store(false, Ordering::SeqCst);
     });
 }
 
 fn escape(shared: &Arc<Shared>) {
+    // Handed-off playback runs in a separate mpv window; ESC returns to the
+    // in-app embed instead of quitting.
     if shared.handoff {
         switch_mode(shared);
         return;
@@ -349,9 +365,13 @@ fn escape(shared: &Arc<Shared>) {
             .unwrap_or(false);
     if fullscreen {
         toggle_fullscreen(shared);
-    } else {
-        quit(shared);
+        return;
     }
+    if shared.embedded {
+        // Embedded chrome: leave fullscreen / UI first; only quit from Back.
+        return;
+    }
+    quit(shared);
 }
 
 fn quit(shared: &Shared) {
@@ -409,6 +429,16 @@ pub async fn player_request(
         Ok(result) => result,
         Err(err) => Err(err.to_string()),
     }
+}
+
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn player_focus(app: AppHandle, state: State<'_, PlayerState>) -> Result<(), String> {
+    if lock(&state.inner).is_some() {
+        #[cfg(target_os = "macos")]
+        crate::libmpv::focus_player(&app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -975,7 +1005,7 @@ fn emit_status(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe) {
     );
 }
 
-fn emit_closed(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe, reason: &str) {
+fn emit_closed(app: &AppHandle, shared: &Arc<Shared>, probe: &PlaybackProbe, reason: &str) {
     shared.awake.set(false);
     if !shared.suppress_close.load(Ordering::SeqCst) {
         mpris(app, Update::Stopped);
@@ -1003,6 +1033,17 @@ fn emit_closed(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe, reason: 
             rate: probe.rate,
         },
     );
+    drop_stale_session(app, shared);
+}
+
+/// Removes a session entry after mpv exits so the next play does not inherit
+/// stale handoff / fullscreen state.
+fn drop_stale_session(app: &AppHandle, shared: &Arc<Shared>) {
+    let inner = &app.state::<PlayerState>().inner;
+    let mut guard = lock(inner);
+    if guard.as_ref().is_some_and(|session| Arc::ptr_eq(&session.shared, shared)) {
+        *guard = None;
+    }
 }
 
 fn drain_stderr(mut stderr: std::process::ChildStderr, slot: Arc<Mutex<String>>) {

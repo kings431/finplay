@@ -77,6 +77,11 @@ export function Home() {
     if (heroes.length === 0 && candidates.length > 0) setHeroes(candidates);
   }, [heroes.length, candidates.length]);
   const hero = heroes[heroIndex] ?? heroes[0];
+  const stepHero = (delta: number) => {
+    if (heroes.length <= 1) return;
+    setHeroIndex((current) => (current + delta + heroes.length) % heroes.length);
+    setPaused(true);
+  };
 
   const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
   const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
@@ -85,7 +90,28 @@ export function Home() {
 
   return (
     <div className="home">
-      <div className={`hero-carousel${paused ? " paused" : ""}`} onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
+      <div
+        className={`hero-carousel${paused ? " paused" : ""}`}
+        onMouseEnter={() => setPaused(true)}
+        onMouseLeave={() => setPaused(false)}
+        onWheel={(event) => {
+          if (heroes.length <= 1) return;
+          const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) && Math.abs(event.deltaX) > 8;
+          if (!horizontal) return;
+          event.preventDefault();
+          stepHero(event.deltaX > 0 ? 1 : -1);
+        }}
+      >
+        {heroes.length > 1 ? (
+          <>
+            <button type="button" className="hero-nav hero-prev" onClick={() => stepHero(-1)} aria-label="Previous highlight">
+              ‹
+            </button>
+            <button type="button" className="hero-nav hero-next" onClick={() => stepHero(1)} aria-label="Next highlight">
+              ›
+            </button>
+          </>
+        ) : null}
         {hero ? (
           <Hero
             items={heroes}

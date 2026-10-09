@@ -10,7 +10,7 @@ mod stats;
 mod trailer;
 
 use downloads::{download_delete, download_dir, download_list, download_progress, download_start};
-use mpv::{player_play, player_request, player_stop, player_thumb, PlayerState};
+use mpv::{player_focus, player_play, player_request, player_stop, player_thumb, PlayerState};
 use stats::open_stats;
 use trailer::play_trailer;
 use tauri::Manager;
@@ -52,6 +52,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             player_play,
             player_request,
+            player_focus,
             player_stop,
             player_thumb,
             download_list,

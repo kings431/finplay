@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "trailer",
+  "description": "Embedded YouTube trailer window",
+  "windows": ["trailer"],
+  "permissions": [
+    "core:default",
+    "core:webview:default",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-title",
+    "core:window:allow-unminimize"
+  ]
+}

@@ -43,7 +43,10 @@ pub async fn play_trailer(app: AppHandle, url: String, title: String, mpv_path: 
         return Err("This trailer link is not a web address.".into());
     }
     let target = match youtube_id(&parsed) {
-        Some(id) => Url::parse(&format!("https://www.youtube.com/watch?v={id}")).map_err(|err| err.to_string())?,
+        Some(id) => Url::parse(&format!(
+            "https://www.youtube-nocookie.com/embed/{id}?autoplay=1&rel=0&modestbranding=1&playsinline=1"
+        ))
+        .map_err(|err| err.to_string())?,
         None => parsed,
     };
     let title: String = title.chars().filter(|ch| !ch.is_control()).take(160).collect();

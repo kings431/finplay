@@ -274,6 +274,16 @@ pub fn follow_host() {
     }
 }
 
+/// Brings keyboard focus to the embedded player window (macOS).
+pub fn focus_player(app: &AppHandle) {
+    let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some((player, _host)) = attached else { return };
+    let _ = app.run_on_main_thread(move || unsafe {
+        let window = player as *mut AnyObject;
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+    });
+}
+
 impl LibMpv {
     /// `embed` attaches the player as a borderless child over Finplay. When
     /// false, mpv keeps a normal window suitable for Spaces fullscreen (`--fs`).

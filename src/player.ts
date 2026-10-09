@@ -54,6 +54,12 @@ export async function playerStop() {
   await invoke("player_stop");
 }
 
+export async function playerFocus() {
+  if (!inTauri()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("player_focus");
+}
+
 export async function listenThumbRequests(handler: (request: { time: number; width: number }) => void) {
   const { listen } = await import("@tauri-apps/api/event");
   return listen<{ time: number; width: number }>("player-thumb", (event) => handler(event.payload));

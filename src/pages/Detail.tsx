@@ -41,7 +41,7 @@ function TrailerButton({ item }: { item: BaseItem }) {
         await play(local, { fromStart: true, returnTo: `/item/${item.Id}` });
       } else if (remote) {
         const where = await playRemoteTrailer(remote, item.Name);
-        if (where === "window") setNote("Opened on YouTube. Install yt-dlp to play trailers in mpv.");
+        if (where === "window") setNote("Playing in the trailer window.");
       }
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));

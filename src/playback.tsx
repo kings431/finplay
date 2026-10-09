@@ -4,7 +4,7 @@ import { Jellyfin } from "./jellyfin";
 import { useSession } from "./session";
 import { loadSettings } from "./settings";
 import { invalidate } from "./cache";
-import { listenNext, listenPlayer, listenThumbRequests, playerPlay, playerRequest, playerStop, inTauri } from "./player";
+import { listenNext, listenPlayer, listenThumbRequests, playerFocus, playerPlay, playerRequest, playerStop, inTauri } from "./player";
 import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
 import { nextDownloaded, useDownloads, type DownloadEntry } from "./downloads";
@@ -302,6 +302,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             artist: playback.item.SeriesName ?? (playback.item.ProductionYear ? String(playback.item.ProductionYear) : ""),
             artUrl: media.artUrl,
           });
+          void playerFocus();
         } catch (err) {
           if (activeRef.current?.playSessionId === playback.playSessionId) {
             activeRef.current = null;
@@ -457,30 +458,15 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     await playerRequest(["set_property", "pause", next]);
   }, []);
 
-  // Embedded mpv (--wid / child window) often leaves keyboard focus on the
-  // webview, so Space/arrows never reach finplay.lua. Forward them as keypress
-  // commands for the whole playback session, not only on /playing.
+  // Embedded mpv often leaves keyboard focus on the webview. Drive playback
+  // through IPC for the whole session so Space/arrows work in and out of fullscreen.
   useEffect(() => {
     if (!active || !inTauri()) return;
-    const keys: Record<string, string> = {
-      " ": "SPACE",
-      ArrowLeft: "LEFT",
-      ArrowRight: "RIGHT",
-      ArrowUp: "UP",
-      ArrowDown: "DOWN",
-      Escape: "ESC",
-      Backspace: "BS",
-      f: "f",
-      F: "f",
-      a: "a",
-      A: "a",
-      s: "s",
-      S: "s",
-      c: "c",
-      C: "c",
-      "[": "[",
-      "]": "]",
-    };
+    async function nudgeVolume(delta: number) {
+      const current = await playerRequest(["get_property", "volume"]);
+      const volume = typeof current === "number" ? current : 100;
+      await playerRequest(["set_property", "volume", Math.min(130, Math.max(0, volume + delta))]);
+    }
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       if (resumeAsk) return;
@@ -491,16 +477,61 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         tag === "SELECT" ||
         (tag === "INPUT" && (target as HTMLInputElement).type !== "range");
       if (typing) return;
-      const name = keys[event.key];
-      if (!name) return;
-      // Scrubber owns left/right; still let Space pause from there.
-      if (tag === "INPUT" && (name === "LEFT" || name === "RIGHT")) return;
+      if (tag === "INPUT" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) return;
+      let handled = false;
+      if (event.key === " ") {
+        handled = true;
+        void playerRequest(["cycle", "pause"]);
+      } else if (event.key === "ArrowLeft") {
+        handled = true;
+        void playerRequest(["seek", -10, "relative", "exact"]);
+      } else if (event.key === "ArrowRight") {
+        handled = true;
+        void playerRequest(["seek", 10, "relative", "exact"]);
+      } else if (event.key === "ArrowUp") {
+        handled = true;
+        void nudgeVolume(5);
+      } else if (event.key === "ArrowDown") {
+        handled = true;
+        void nudgeVolume(-5);
+      } else if (event.key === "Escape") {
+        handled = true;
+        void playerRequest(["script-message", "finplay-escape"]);
+      } else if (event.key === "Backspace") {
+        handled = true;
+        void playerRequest(["script-message", "finplay-back"]);
+      } else if (event.key === "f" || event.key === "F") {
+        handled = true;
+        void playerRequest(["script-message", "finplay-fullscreen"]);
+      } else if (event.key === "a" || event.key === "A") {
+        handled = true;
+        void playerRequest(["keypress", "a"]);
+      } else if (event.key === "s" || event.key === "S") {
+        handled = true;
+        void playerRequest(["keypress", "s"]);
+      } else if (event.key === "c" || event.key === "C") {
+        handled = true;
+        void playerRequest(["keypress", "c"]);
+      } else if (event.key === "[") {
+        handled = true;
+        void playerRequest(["keypress", "["]);
+      } else if (event.key === "]") {
+        handled = true;
+        void playerRequest(["keypress", "]"]);
+      }
+      if (!handled) return;
       event.preventDefault();
       event.stopPropagation();
-      void playerRequest(["keypress", name]).catch(() => {});
+    }
+    function onFocus() {
+      void playerFocus();
     }
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [active, resumeAsk]);
 
   const value = useMemo<PlaybackContextValue>(
