@@ -211,7 +211,10 @@ pub async fn player_play(
         if crate::libmpv::locate(&app).is_none() {
             wid = None;
         }
-        let handoff = wid.is_some() && request.fullscreen && wayland_session();
+        // Fullscreen while embedded is unsafe on Wayland (no foreign surfaces)
+        // and on macOS (AppKit crashes borderless child windows that try Spaces
+        // fullscreen). Hand off to a standalone mpv window with --fs instead.
+        let handoff = wid.is_some() && request.fullscreen && (wayland_session() || cfg!(target_os = "macos"));
         if handoff {
             wid = None;
         }
@@ -250,13 +253,6 @@ fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 
 fn restore_window(shared: &Shared) {
     if shared.made_fullscreen.swap(false, Ordering::SeqCst) {
-        #[cfg(target_os = "macos")]
-        {
-            // Fullscreen was on mpv's own window / Space, not Finplay's.
-            crate::libmpv::clear_player_fullscreen_state();
-            return;
-        }
-        #[cfg(not(target_os = "macos"))]
         if let Some(window) = main_window(&shared.app) {
             let _ = window.set_fullscreen(false);
         }
@@ -269,26 +265,16 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
 }
 
+fn needs_fullscreen_handoff(embedded: bool) -> bool {
+    embedded && (wayland_session() || cfg!(target_os = "macos"))
+}
+
 fn toggle_fullscreen(shared: &Arc<Shared>) {
-    if shared.handoff || (shared.embedded && wayland_session()) {
+    // Embedded borderless child windows cannot take Spaces fullscreen on macOS
+    // (AppKit throws NSGenericException). Restart in a normal mpv window with
+    // --fs, then hand back when leaving fullscreen — same as Wayland.
+    if shared.handoff || needs_fullscreen_handoff(shared.embedded) {
         switch_mode(shared);
-        return;
-    }
-    // On macOS the embedded player is a child NSWindow. Fullscreening Finplay
-    // (or re-adding that child mid-transition) can crash or freeze the session.
-    // Instead, detach the player and let mpv take its own Spaces desktop — the
-    // same pattern as VLC/IINA.
-    #[cfg(target_os = "macos")]
-    if shared.embedded {
-        let next = !shared.made_fullscreen.load(Ordering::SeqCst);
-        if next {
-            crate::libmpv::begin_player_fullscreen();
-            fire(shared, json!(["set_property", "fullscreen", true]));
-        } else {
-            fire(shared, json!(["set_property", "fullscreen", false]));
-            crate::libmpv::schedule_end_player_fullscreen(shared.app.clone());
-        }
-        shared.made_fullscreen.store(next, Ordering::SeqCst);
         return;
     }
     if let Some(window) = main_window(&shared.app) {
@@ -357,8 +343,7 @@ fn escape(shared: &Arc<Shared>) {
         switch_mode(shared);
         return;
     }
-    let made = shared.made_fullscreen.load(Ordering::SeqCst);
-    let fullscreen = made
+    let fullscreen = shared.made_fullscreen.load(Ordering::SeqCst)
         || main_window(&shared.app)
             .and_then(|window| window.is_fullscreen().ok())
             .unwrap_or(false);
@@ -601,14 +586,6 @@ fn start_player(
             args.push("--hwdec=nvdec,auto-safe".into());
         }
         if request.fullscreen {
-            #[cfg(target_os = "macos")]
-            {
-                // Player takes its own Spaces desktop; Finplay stays windowed.
-                crate::libmpv::begin_player_fullscreen();
-                args.push("--fs".into());
-                made_fullscreen = true;
-            }
-            #[cfg(not(target_os = "macos"))]
             if let Some(window) = main_window(&app) {
                 made_fullscreen = !window.is_fullscreen().unwrap_or(false) && window.set_fullscreen(true).is_ok();
             }
@@ -618,8 +595,13 @@ fn start_player(
         args.push("--hwdec=auto-safe".into());
     }
     if wid.is_none() {
+        // Standalone window (Wayland/macOS fullscreen handoff, or no embed).
+        // Keep a normal chrome so macOS can run a real Spaces transition.
         let placement = if request.fullscreen { "--fs" } else { "--geometry=80%x80%" };
         args.push(placement.into());
+        if request.fullscreen {
+            args.push("--native-fs=yes".into());
+        }
     }
     if !request.audio_lang.trim().is_empty() {
         args.push(format!("--alang={}", request.audio_lang.trim()));
@@ -662,13 +644,15 @@ fn start_player(
     args.push(media);
 
     let stderr_tail = Arc::new(Mutex::new(String::new()));
+    // Always prefer bundled libmpv on macOS, including fullscreen handoff where
+    // wid is None (a separate mpv process is not shipped in the app bundle).
     #[cfg(target_os = "macos")]
-    let library = wid.and(crate::libmpv::locate(&app));
+    let library = crate::libmpv::locate(&app);
     #[cfg(not(target_os = "macos"))]
     let library: Option<std::path::PathBuf> = None;
     let mut child = match library {
         #[cfg(target_os = "macos")]
-        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args)?),
+        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args, wid.is_some())?),
         #[cfg(not(target_os = "macos"))]
         Some(_) => unreachable!(),
         None => {
@@ -703,9 +687,6 @@ fn start_player(
         Err(err) => {
             child.terminate();
             if made_fullscreen {
-                #[cfg(target_os = "macos")]
-                crate::libmpv::clear_player_fullscreen_state();
-                #[cfg(not(target_os = "macos"))]
                 if let Some(window) = main_window(&app) {
                     let _ = window.set_fullscreen(false);
                 }

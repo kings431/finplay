@@ -1,9 +1,14 @@
 //! Runs mpv inside Finplay through libmpv. mpv's macOS video outputs ignore
-//! `--wid` and always open their own window, so the player window is made a
-//! borderless child of Finplay's window, laid over its content area; AppKit
-//! window pointers are only usable in-process. The bundled libmpv is loaded
-//! at runtime, and the player is still driven over its JSON IPC socket
-//! exactly like the mpv process is.
+//! `--wid` and always open their own window, so in windowed mode that window is
+//! made a borderless child of Finplay and laid over the content area.
+//!
+//! Fullscreen cannot use that child relationship: AppKit refuses Spaces
+//! fullscreen on borderless child windows (NSGenericException / hard crash).
+//! IINA avoids this by owning the NSWindow; Finplay instead hands off to a
+//! normal standalone mpv window with `--fs` (same idea as the Linux Wayland
+//! handoff). AppKit window pointers are only usable in-process. The bundled
+//! libmpv is loaded at runtime, and the player is still driven over its JSON
+//! IPC socket exactly like the mpv process is.
 
 use libloading::Library;
 use objc2::encode::{Encode, Encoding};
@@ -11,7 +16,6 @@ use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -190,15 +194,6 @@ const NS_WINDOW_ABOVE: isize = 1;
 /// (player NSWindow, Finplay NSWindow) while the player is attached.
 /// Only touched on the main thread, as AppKit requires.
 static ATTACHED: Mutex<Option<(usize, usize)>> = Mutex::new(None);
-/// When set, the player keeps its own window (Spaces fullscreen) instead of
-/// being a child of Finplay. Attach is skipped until this clears.
-static DEFER_ATTACH: AtomicBool = AtomicBool::new(false);
-/// Bumps when a reattach is scheduled so older timers are ignored.
-static FS_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// Live libmpv handle, for reading a fresh `window-id` after fullscreen.
-/// Storing the NSWindow pointer across a Spaces transition is unsafe — mpv may
-/// recreate the window.
-static CURRENT: Mutex<Option<usize>> = Mutex::new(None);
 
 fn host_window(app: &AppHandle) -> Option<usize> {
     let window = app.get_webview_window("main")?;
@@ -226,8 +221,7 @@ fn rect_near(a: Rect, b: Rect) -> bool {
 
 /// Lays the player window over the host's content area.
 /// Exact f64 equality is avoided: AppKit often returns a slightly different
-/// frame after `setFrame`, which would resize forever and can lock the session
-/// when the host is fullscreen.
+/// frame after `setFrame`, which would otherwise resize forever.
 unsafe fn place(player: usize, host: usize) {
     let (player, host) = (player as *mut AnyObject, host as *mut AnyObject);
     let frame: Rect = msg_send![host, frame];
@@ -238,17 +232,7 @@ unsafe fn place(player: usize, host: usize) {
     }
 }
 
-fn remove_child(player: usize, host: usize) {
-    unsafe {
-        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
-        let _: () = msg_send![parent, removeChildWindow: window];
-    }
-}
-
 fn attach(app: &AppHandle, player: usize) {
-    if DEFER_ATTACH.load(Ordering::SeqCst) {
-        return;
-    }
     let Some(host) = host_window(app) else { return };
     // AppKit may send window events synchronously; never hold the lock across it.
     let previous = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host));
@@ -256,7 +240,8 @@ fn attach(app: &AppHandle, player: usize) {
     unsafe {
         if let Some((old_player, old_host)) = previous {
             if old_player != player || old_host != host {
-                remove_child(old_player, old_host);
+                let (window, parent) = (old_player as *mut AnyObject, old_host as *mut AnyObject);
+                let _: () = msg_send![parent, removeChildWindow: window];
             }
         }
         if fresh {
@@ -270,72 +255,19 @@ fn attach(app: &AppHandle, player: usize) {
 }
 
 fn detach() {
-    DEFER_ATTACH.store(false, Ordering::SeqCst);
-    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
-    *CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     let Some((player, host)) = attached else { return };
     unsafe {
-        remove_child(player, host);
-        let parent = host as *mut AnyObject;
+        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
+        let _: () = msg_send![parent, removeChildWindow: window];
         let _: () = msg_send![parent, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
     }
 }
 
-/// Lets the player use its own Spaces fullscreen desktop. The child link is
-/// removed first — AppKit will not fullscreen a child window safely.
-pub fn begin_player_fullscreen() {
-    DEFER_ATTACH.store(true, Ordering::SeqCst);
-    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
-    let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-    if let Some((player, host)) = attached {
-        remove_child(player, host);
-    }
-}
-
-/// After mpv leaves fullscreen, embed it over Finplay again using a fresh window id.
-pub fn end_player_fullscreen(app: &AppHandle) {
-    DEFER_ATTACH.store(false, Ordering::SeqCst);
-    let player = {
-        let guard = CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(raw) = *guard else { return };
-        let Some(api) = api_from_current() else { return };
-        window_id(api, raw as *mut c_void)
-    };
-    if let Some(player) = player {
-        attach(app, player);
-    }
-}
-
-fn api_from_current() -> Option<&'static Api> {
-    API.get().and_then(|result| result.as_ref().ok()).map(|(_, api)| api)
-}
-
-/// Re-embeds the player after Spaces finishes animating out of fullscreen.
-pub fn schedule_end_player_fullscreen(app: AppHandle) {
-    let generation = FS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(700));
-        if FS_GENERATION.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || end_player_fullscreen(&handle));
-    });
-}
-
-/// Clears fullscreen deferral when playback stops (host was never fullscreened).
-pub fn clear_player_fullscreen_state() {
-    DEFER_ATTACH.store(false, Ordering::SeqCst);
-    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
-}
-
-/// Keeps the player covering Finplay's content after the window moves,
-/// resizes or changes fullscreen. Call on the main thread.
+/// Keeps the player covering Finplay's content after the window moves or
+/// resizes. Call on the main thread. No-op while the player is a standalone
+/// fullscreen window (not attached).
 pub fn follow_host() {
-    if DEFER_ATTACH.load(Ordering::SeqCst) {
-        return;
-    }
     let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some((player, host)) = attached {
         unsafe { place(player, host) };
@@ -343,7 +275,9 @@ pub fn follow_host() {
 }
 
 impl LibMpv {
-    pub fn start(app: &AppHandle, path: &Path, args: &[String]) -> Result<Self, String> {
+    /// `embed` attaches the player as a borderless child over Finplay. When
+    /// false, mpv keeps a normal window suitable for Spaces fullscreen (`--fs`).
+    pub fn start(app: &AppHandle, path: &Path, args: &[String], embed: bool) -> Result<Self, String> {
         let api = api(path)?;
         let raw = unsafe { (api.create)() };
         if raw.is_null() {
@@ -366,12 +300,18 @@ impl LibMpv {
         let mut options = vec![
             ("input-default-bindings".to_string(), "yes".to_string()),
             ("input-vo-keyboard".to_string(), "yes".to_string()),
-            // The window is resized to Finplay's content area, never by mpv.
-            ("border".to_string(), "no".to_string()),
-            ("title-bar".to_string(), "no".to_string()),
-            ("auto-window-resize".to_string(), "no".to_string()),
-            ("keepaspect-window".to_string(), "no".to_string()),
         ];
+        if embed {
+            // Child overlay: Finplay sizes the window; chrome would show through.
+            options.extend([
+                ("border".to_string(), "no".to_string()),
+                ("title-bar".to_string(), "no".to_string()),
+                ("auto-window-resize".to_string(), "no".to_string()),
+                ("keepaspect-window".to_string(), "no".to_string()),
+            ]);
+        }
+        // Standalone / fullscreen keeps mpv's normal titled window so AppKit
+        // can run a real Spaces fullscreen transition (`native-fs`).
         let mut media = None;
         let mut rest = args.iter();
         for arg in rest.by_ref() {
@@ -411,7 +351,6 @@ impl LibMpv {
             }
         }
 
-        *CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(raw as usize);
         let alive = Arc::new(Mutex::new(Some(Handle(raw))));
         let watcher = Arc::clone(&alive);
         let events = raw as usize;
@@ -431,34 +370,35 @@ impl LibMpv {
             }
         });
 
-        let poll = Arc::clone(&alive);
-        let poll_app = app.clone();
-        std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while Instant::now() < deadline {
-                let ready = {
-                    let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    guard.as_ref().and_then(|handle| window_id(api, handle.0)).is_some()
-                };
-                if ready {
-                    // mpv may still size its window just after creating it.
-                    // Always re-read window-id — fullscreen can recreate it.
-                    for delay in [0, 250, 1000] {
-                        std::thread::sleep(Duration::from_millis(delay));
-                        let id = {
-                            let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            let Some(handle) = guard.as_ref() else { return };
-                            window_id(api, handle.0)
-                        };
-                        let Some(player) = id else { continue };
-                        let app = poll_app.clone();
-                        let _ = poll_app.run_on_main_thread(move || attach(&app, player));
+        if embed {
+            let poll = Arc::clone(&alive);
+            let poll_app = app.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while Instant::now() < deadline {
+                    let ready = {
+                        let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard.as_ref().and_then(|handle| window_id(api, handle.0)).is_some()
+                    };
+                    if ready {
+                        // mpv may still size its window just after creating it.
+                        for delay in [0, 250, 1000] {
+                            std::thread::sleep(Duration::from_millis(delay));
+                            let id = {
+                                let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                let Some(handle) = guard.as_ref() else { return };
+                                window_id(api, handle.0)
+                            };
+                            let Some(player) = id else { continue };
+                            let app = poll_app.clone();
+                            let _ = poll_app.run_on_main_thread(move || attach(&app, player));
+                        }
+                        return;
                     }
-                    return;
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
+            });
+        }
         Ok(Self { api, alive, app: app.clone() })
     }
 
