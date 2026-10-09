@@ -229,35 +229,10 @@ end
 
 local function icon_speed(cx, cy, u)
     outline(circle(cx, cy, u * 0.36), u * 0.07)
-    text(cx, cy + u * 0.02, 5, u * 0.28, "1×", "FFFFFF", "\\b1")
+    text(cx, cy + u * 0.02, 5, u * 0.28, "1x", "FFFFFF", "\\b1")
 end
 
 local SPEEDS = { 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 }
-
-local function set_speed(value)
-    mp.set_property_number("speed", value)
-    if value == math.floor(value) then
-        toast(string.format("Speed %dx", value))
-    else
-        toast(string.format("Speed %gx", value))
-    end
-end
-
-local function nudge_speed(direction)
-    local current = mp.get_property_number("speed") or 1
-    local best, distance = SPEEDS[1], math.huge
-    for _, speed in ipairs(SPEEDS) do
-        local gap = math.abs(speed - current)
-        if gap < distance then
-            best, distance = speed, gap
-        end
-    end
-    local index = 1
-    for i, speed in ipairs(SPEEDS) do
-        if speed == best then index = i end
-    end
-    set_speed(SPEEDS[clamp(index + direction, 1, #SPEEDS)])
-end
 
 -- Actions.
 
@@ -297,6 +272,31 @@ end
 local function toast(message)
     state.toast = message
     state.toast_until = now() + 1.4
+end
+
+local function set_speed(value)
+    mp.set_property_number("speed", value)
+    if value == math.floor(value) then
+        toast(string.format("Speed %dx", value))
+    else
+        toast(string.format("Speed %gx", value))
+    end
+end
+
+local function nudge_speed(direction)
+    local current = mp.get_property_number("speed") or 1
+    local best, distance = SPEEDS[1], math.huge
+    for _, speed in ipairs(SPEEDS) do
+        local gap = math.abs(speed - current)
+        if gap < distance then
+            best, distance = speed, gap
+        end
+    end
+    local index = 1
+    for i, speed in ipairs(SPEEDS) do
+        if speed == best then index = i end
+    end
+    set_speed(SPEEDS[clamp(index + direction, 1, #SPEEDS)])
 end
 
 local function change_volume(step)
@@ -403,13 +403,15 @@ local function menu_rows(kind)
             rows[1] = { label = "Off", detail = "", selected = not any, pick = function() mp.set_property("sid", "no") end }
         end
         for _, track in ipairs(list) do
+            -- Copy id: Lua 5.1 loop variables are shared across closures.
             local id = track.id
+            local prop = kind == "sub" and "sid" or "aid"
             rows[#rows + 1] = {
                 label = track_label(track),
                 detail = track_detail(track),
                 selected = track.selected,
                 pick = function()
-                    mp.set_property_number(kind == "sub" and "sid" or "aid", id)
+                    mp.set_property_number(prop, id)
                 end,
             }
         end
@@ -420,8 +422,9 @@ local function menu_rows(kind)
         local current = mp.get_property_number("chapter")
         for index, chapter in ipairs(chapters) do
             local at = chapter.time or 0
+            local title = (chapter.title and chapter.title ~= "" and chapter.title) or ("Chapter " .. index)
             rows[#rows + 1] = {
-                label = (chapter.title and chapter.title ~= "" and chapter.title) or ("Chapter " .. index),
+                label = title,
                 detail = format_time(at),
                 selected = current == index - 1,
                 pick = function()
@@ -434,11 +437,12 @@ local function menu_rows(kind)
     if kind == "speed" then
         local current = mp.get_property_number("speed") or 1
         for _, speed in ipairs(SPEEDS) do
+            local value = speed
             rows[#rows + 1] = {
-                label = speed == 1 and "Normal" or (tostring(speed) .. "×"),
+                label = value == 1 and "Normal" or (tostring(value) .. "x"),
                 detail = "",
-                selected = math.abs(current - speed) < 0.01,
-                pick = function() set_speed(speed) end,
+                selected = math.abs(current - value) < 0.01,
+                pick = function() set_speed(value) end,
             }
         end
         return rows, nil
@@ -477,8 +481,12 @@ local function draw_menu(pad)
         local ry = y + header + (index - 1) * row_h
         local pick = row.pick
         local over = add_button(x + 6 * scale, ry, panel_w - 12 * scale, row_h, function()
-            pick()
+            -- Always close the menu even if the action errors, so controls stay usable.
+            local ok, err = pcall(pick)
             state.menu = nil
+            if not ok then
+                toast(tostring(err):match(":[%d]+:%s*(.*)$") or "Couldn't apply that")
+            end
         end)
         if over then
             shape(rrect(x + 6 * scale, ry + 2 * scale, panel_w - 12 * scale, row_h - 4 * scale, 10 * scale), "FFFFFF", "E6")
