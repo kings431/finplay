@@ -250,8 +250,15 @@ fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 
 fn restore_window(shared: &Shared) {
     if shared.made_fullscreen.swap(false, Ordering::SeqCst) {
+        #[cfg(target_os = "macos")]
+        {
+            // Fullscreen was on mpv's own window / Space, not Finplay's.
+            crate::libmpv::clear_player_fullscreen_state();
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
         if let Some(window) = main_window(&shared.app) {
-            apply_host_fullscreen(&window, false);
+            let _ = window.set_fullscreen(false);
         }
     }
 }
@@ -262,36 +269,31 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
 }
 
-/// Applies host-window fullscreen. On macOS, Spaces fullscreen is kept (new
-/// desktop, like other Mac players), but the libmpv child window is detached
-/// for the transition — attaching during the animation can lock up the session.
-fn apply_host_fullscreen(window: &WebviewWindow, on: bool) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        crate::libmpv::suspend_for_fullscreen();
-        let ok = window.set_fullscreen(on).is_ok();
-        crate::libmpv::schedule_resume_after_fullscreen(window.app_handle().clone());
-        ok
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        window.set_fullscreen(on).is_ok()
-    }
-}
-
-fn host_is_fullscreen(window: &WebviewWindow, made: bool) -> bool {
-    made || window.is_fullscreen().unwrap_or(false)
-}
-
 fn toggle_fullscreen(shared: &Arc<Shared>) {
     if shared.handoff || (shared.embedded && wayland_session()) {
         switch_mode(shared);
         return;
     }
+    // On macOS the embedded player is a child NSWindow. Fullscreening Finplay
+    // (or re-adding that child mid-transition) can crash or freeze the session.
+    // Instead, detach the player and let mpv take its own Spaces desktop — the
+    // same pattern as VLC/IINA.
+    #[cfg(target_os = "macos")]
+    if shared.embedded {
+        let next = !shared.made_fullscreen.load(Ordering::SeqCst);
+        if next {
+            crate::libmpv::begin_player_fullscreen();
+            fire(shared, json!(["set_property", "fullscreen", true]));
+        } else {
+            fire(shared, json!(["set_property", "fullscreen", false]));
+            crate::libmpv::schedule_end_player_fullscreen(shared.app.clone());
+        }
+        shared.made_fullscreen.store(next, Ordering::SeqCst);
+        return;
+    }
     if let Some(window) = main_window(&shared.app) {
-        let made = shared.made_fullscreen.load(Ordering::SeqCst);
-        let next = !host_is_fullscreen(&window, made);
-        if apply_host_fullscreen(&window, next) {
+        let next = !window.is_fullscreen().unwrap_or(false);
+        if window.set_fullscreen(next).is_ok() {
             shared.made_fullscreen.store(next, Ordering::SeqCst);
         }
     }
@@ -356,7 +358,10 @@ fn escape(shared: &Arc<Shared>) {
         return;
     }
     let made = shared.made_fullscreen.load(Ordering::SeqCst);
-    let fullscreen = main_window(&shared.app).is_some_and(|window| host_is_fullscreen(&window, made));
+    let fullscreen = made
+        || main_window(&shared.app)
+            .and_then(|window| window.is_fullscreen().ok())
+            .unwrap_or(false);
     if fullscreen {
         toggle_fullscreen(shared);
     } else {
@@ -596,10 +601,16 @@ fn start_player(
             args.push("--hwdec=nvdec,auto-safe".into());
         }
         if request.fullscreen {
+            #[cfg(target_os = "macos")]
+            {
+                // Player takes its own Spaces desktop; Finplay stays windowed.
+                crate::libmpv::begin_player_fullscreen();
+                args.push("--fs".into());
+                made_fullscreen = true;
+            }
+            #[cfg(not(target_os = "macos"))]
             if let Some(window) = main_window(&app) {
-                // Prefer simple fullscreen on macOS; Spaces fullscreen with the
-                // libmpv child window has locked up the whole session.
-                made_fullscreen = apply_host_fullscreen(&window, true);
+                made_fullscreen = !window.is_fullscreen().unwrap_or(false) && window.set_fullscreen(true).is_ok();
             }
         }
     }
@@ -692,8 +703,11 @@ fn start_player(
         Err(err) => {
             child.terminate();
             if made_fullscreen {
+                #[cfg(target_os = "macos")]
+                crate::libmpv::clear_player_fullscreen_state();
+                #[cfg(not(target_os = "macos"))]
                 if let Some(window) = main_window(&app) {
-                    apply_host_fullscreen(&window, false);
+                    let _ = window.set_fullscreen(false);
                 }
             }
             return Err(err);

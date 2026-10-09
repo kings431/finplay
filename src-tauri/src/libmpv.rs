@@ -190,13 +190,15 @@ const NS_WINDOW_ABOVE: isize = 1;
 /// (player NSWindow, Finplay NSWindow) while the player is attached.
 /// Only touched on the main thread, as AppKit requires.
 static ATTACHED: Mutex<Option<(usize, usize)>> = Mutex::new(None);
-/// Player window waiting to be (re)attached after a Spaces fullscreen transition.
-static PENDING: Mutex<Option<usize>> = Mutex::new(None);
-/// When set, `attach` only remembers the player — Spaces fullscreen must finish
-/// before the child window is added, or AppKit can lock up the session.
+/// When set, the player keeps its own window (Spaces fullscreen) instead of
+/// being a child of Finplay. Attach is skipped until this clears.
 static DEFER_ATTACH: AtomicBool = AtomicBool::new(false);
-/// Bumps when a fullscreen transition is scheduled so older timers are ignored.
+/// Bumps when a reattach is scheduled so older timers are ignored.
 static FS_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Live libmpv handle, for reading a fresh `window-id` after fullscreen.
+/// Storing the NSWindow pointer across a Spaces transition is unsafe — mpv may
+/// recreate the window.
+static CURRENT: Mutex<Option<usize>> = Mutex::new(None);
 
 fn host_window(app: &AppHandle) -> Option<usize> {
     let window = app.get_webview_window("main")?;
@@ -245,17 +247,18 @@ fn remove_child(player: usize, host: usize) {
 
 fn attach(app: &AppHandle, player: usize) {
     if DEFER_ATTACH.load(Ordering::SeqCst) {
-        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
         return;
     }
-    let Some(host) = host_window(app) else {
-        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
-        return;
-    };
-    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    let Some(host) = host_window(app) else { return };
     // AppKit may send window events synchronously; never hold the lock across it.
-    let fresh = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host)) != Some((player, host));
+    let previous = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host));
+    let fresh = previous != Some((player, host));
     unsafe {
+        if let Some((old_player, old_host)) = previous {
+            if old_player != player || old_host != host {
+                remove_child(old_player, old_host);
+            }
+        }
         if fresh {
             let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
             let _: () = msg_send![window, setHasShadow: false];
@@ -268,7 +271,8 @@ fn attach(app: &AppHandle, player: usize) {
 
 fn detach() {
     DEFER_ATTACH.store(false, Ordering::SeqCst);
-    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
+    *CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     let Some((player, host)) = attached else { return };
     unsafe {
@@ -278,43 +282,52 @@ fn detach() {
     }
 }
 
-/// Detaches the player for a Spaces fullscreen transition. The window id is
-/// kept so it can be re-added once the host is in (or out of) the new Space.
-pub fn suspend_for_fullscreen() {
+/// Lets the player use its own Spaces fullscreen desktop. The child link is
+/// removed first — AppKit will not fullscreen a child window safely.
+pub fn begin_player_fullscreen() {
     DEFER_ATTACH.store(true, Ordering::SeqCst);
+    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     if let Some((player, host)) = attached {
         remove_child(player, host);
-        *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(player);
     }
 }
 
-/// Re-attaches a player that was deferred or suspended around fullscreen.
-pub fn resume_after_fullscreen(app: &AppHandle) {
+/// After mpv leaves fullscreen, embed it over Finplay again using a fresh window id.
+pub fn end_player_fullscreen(app: &AppHandle) {
     DEFER_ATTACH.store(false, Ordering::SeqCst);
-    let player = PENDING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-        .or_else(|| ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).map(|(player, _)| player));
+    let player = {
+        let guard = CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(raw) = *guard else { return };
+        let Some(api) = api_from_current() else { return };
+        window_id(api, raw as *mut c_void)
+    };
     if let Some(player) = player {
         attach(app, player);
     }
 }
 
-/// Runs `resume_after_fullscreen` after Spaces finishes animating. Newer calls
-/// cancel older timers so rapid toggles do not reattach mid-transition.
-pub fn schedule_resume_after_fullscreen(app: AppHandle) {
+fn api_from_current() -> Option<&'static Api> {
+    API.get().and_then(|result| result.as_ref().ok()).map(|(_, api)| api)
+}
+
+/// Re-embeds the player after Spaces finishes animating out of fullscreen.
+pub fn schedule_end_player_fullscreen(app: AppHandle) {
     let generation = FS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
-        // Lion+ Spaces fullscreen animation is about half a second.
-        std::thread::sleep(Duration::from_millis(850));
+        std::thread::sleep(Duration::from_millis(700));
         if FS_GENERATION.load(Ordering::SeqCst) != generation {
             return;
         }
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || resume_after_fullscreen(&handle));
+        let _ = app.run_on_main_thread(move || end_player_fullscreen(&handle));
     });
+}
+
+/// Clears fullscreen deferral when playback stops (host was never fullscreened).
+pub fn clear_player_fullscreen_state() {
+    DEFER_ATTACH.store(false, Ordering::SeqCst);
+    FS_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Keeps the player covering Finplay's content after the window moves,
@@ -398,6 +411,7 @@ impl LibMpv {
             }
         }
 
+        *CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(raw as usize);
         let alive = Arc::new(Mutex::new(Some(Handle(raw))));
         let watcher = Arc::clone(&alive);
         let events = raw as usize;
@@ -422,18 +436,21 @@ impl LibMpv {
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
             while Instant::now() < deadline {
-                let id = {
+                let ready = {
                     let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let Some(handle) = guard.as_ref() else { return };
-                    window_id(api, handle.0)
+                    guard.as_ref().and_then(|handle| window_id(api, handle.0)).is_some()
                 };
-                if let Some(player) = id {
+                if ready {
                     // mpv may still size its window just after creating it.
+                    // Always re-read window-id — fullscreen can recreate it.
                     for delay in [0, 250, 1000] {
                         std::thread::sleep(Duration::from_millis(delay));
-                        if poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none() {
-                            return;
-                        }
+                        let id = {
+                            let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            let Some(handle) = guard.as_ref() else { return };
+                            window_id(api, handle.0)
+                        };
+                        let Some(player) = id else { continue };
                         let app = poll_app.clone();
                         let _ = poll_app.run_on_main_thread(move || attach(&app, player));
                     }
