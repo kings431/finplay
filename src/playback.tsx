@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Jellyfin } from "./jellyfin";
 import { useSession } from "./session";
 import { loadSettings } from "./settings";
+import { invalidate } from "./cache";
 import { listenNext, listenPlayer, listenThumbRequests, playerPlay, playerRequest, playerStop, inTauri } from "./player";
 import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
@@ -172,6 +173,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         stopSent.current = true;
         await report(current, "stop", positionRef.current, false);
       }
+      // Resume/progress just landed on the server — drop the home snapshot so
+      // Continue Watching refetches instead of painting the pre-watch row.
+      invalidate("home:");
+      invalidate(`item:${current.item.Id}`);
+      if (current.item.SeriesId) invalidate(`item:${current.item.SeriesId}`);
       if (navigateAway) {
         navigateRef.current(statusRef.current === "ready" ? current.returnTo ?? `/item/${current.item.Id}` : "/downloads", { replace: true });
       }
@@ -450,6 +456,52 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const pauseTo = useCallback(async (next: boolean) => {
     await playerRequest(["set_property", "pause", next]);
   }, []);
+
+  // Embedded mpv (--wid / child window) often leaves keyboard focus on the
+  // webview, so Space/arrows never reach finplay.lua. Forward them as keypress
+  // commands for the whole playback session, not only on /playing.
+  useEffect(() => {
+    if (!active || !inTauri()) return;
+    const keys: Record<string, string> = {
+      " ": "SPACE",
+      ArrowLeft: "LEFT",
+      ArrowRight: "RIGHT",
+      ArrowUp: "UP",
+      ArrowDown: "DOWN",
+      Escape: "ESC",
+      Backspace: "BS",
+      f: "f",
+      F: "f",
+      a: "a",
+      A: "a",
+      s: "s",
+      S: "s",
+      c: "c",
+      C: "c",
+      "[": "[",
+      "]": "]",
+    };
+    function onKey(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (resumeAsk) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const typing =
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        (tag === "INPUT" && (target as HTMLInputElement).type !== "range");
+      if (typing) return;
+      const name = keys[event.key];
+      if (!name) return;
+      // Scrubber owns left/right; still let Space pause from there.
+      if (tag === "INPUT" && (name === "LEFT" || name === "RIGHT")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void playerRequest(["keypress", name]).catch(() => {});
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [active, resumeAsk]);
 
   const value = useMemo<PlaybackContextValue>(
     () => ({

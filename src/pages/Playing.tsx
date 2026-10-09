@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { IconBack, IconPause, IconPlay } from "../icons";
 import { backdropUrl, formatClock } from "../media";
 import { playerRequest } from "../player";
@@ -10,7 +9,6 @@ import type { MpvTrack } from "../types";
 export function Playing() {
   const session = useSession();
   const { active, position, duration, paused, finished, stop, togglePause, seek } = usePlayback();
-  const navigate = useNavigate();
   const [tracks, setTracks] = useState<MpvTrack[]>([]);
   const [scrub, setScrub] = useState<number | null>(null);
 
@@ -32,23 +30,6 @@ export function Playing() {
     };
   }, [active]);
 
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null;
-      if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
-      if (event.key === " ") {
-        event.preventDefault();
-        void togglePause();
-      } else if (event.key === "ArrowRight") void seek(Math.min(duration || position + 10, position + 10));
-      else if (event.key === "ArrowLeft") void seek(Math.max(0, position - 10));
-      else if (event.key === "Escape") void playerRequest(["script-message", "finplay-escape"]).catch(() => stop());
-      else if (event.key === "f" || event.key === "F") void playerRequest(["script-message", "finplay-fullscreen"]).catch(() => {});
-      else if (event.key === "Backspace") void stop();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [duration, position, seek, stop, togglePause]);
-
   if (!active) {
     return (
       <div className="page">
@@ -67,7 +48,7 @@ export function Playing() {
     <div className="playing">
       {backdrop ? <img src={backdrop} alt="" /> : null}
       <div className="hero-shade" />
-      <button className="btn-round back" onClick={() => navigate(`/item/${active.item.Id}`)} aria-label="Back">
+      <button className="btn-round back" onClick={() => void stop()} aria-label="Back">
         <IconBack size={18} />
       </button>
       <div className="playing-copy">
