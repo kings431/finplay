@@ -54,7 +54,15 @@ jobs:
           cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" "$dest/"
           chmod u+w "$dest/libmpv.2.dylib"
           install_name_tool -id @loader_path/libmpv.2.dylib "$dest/libmpv.2.dylib"
-          dylibbundler -of -b -x "$dest/libmpv.2.dylib" -d "$dest" -p @loader_path/ -s "$(brew --prefix)/lib"
+          # The Vulkan loader finds MoltenVK (the Metal driver) through an ICD
+          # manifest, not linking, so bundle both; the app points the loader here.
+          cp "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" "$dest/"
+          chmod u+w "$dest/libMoltenVK.dylib"
+          install_name_tool -id @loader_path/libMoltenVK.dylib "$dest/libMoltenVK.dylib"
+          sed -E 's#"library_path"[^,]*#"library_path": "./libMoltenVK.dylib"#' \
+            "$(brew --prefix molten-vk)/etc/vulkan/icd.d/MoltenVK_icd.json" > "$dest/MoltenVK_icd.json"
+          cat "$dest/MoltenVK_icd.json"
+          dylibbundler -of -b -x "$dest/libmpv.2.dylib" -x "$dest/libMoltenVK.dylib" -d "$dest" -p @loader_path/ -s "$(brew --prefix)/lib"
           chmod u+w "$dest"/*.dylib
           codesign --force --sign - "$dest"/*.dylib
           leaked=0

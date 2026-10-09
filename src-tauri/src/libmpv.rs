@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 const MPV_EVENT_SHUTDOWN: c_int = 1;
+const MPV_EVENT_LOG_MESSAGE: c_int = 2;
 
 type Create = unsafe extern "C" fn() -> *mut c_void;
 type SetOption = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
@@ -19,6 +20,7 @@ type Command = unsafe extern "C" fn(*mut c_void, *mut *const c_char) -> c_int;
 type WaitEvent = unsafe extern "C" fn(*mut c_void, f64) -> *const c_int;
 type Destroy = unsafe extern "C" fn(*mut c_void);
 type ErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+type RequestLog = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 
 struct Api {
     create: Create,
@@ -28,6 +30,7 @@ struct Api {
     wait_event: WaitEvent,
     destroy: Destroy,
     error_string: ErrorString,
+    request_log: RequestLog,
 }
 
 /// Loaded once and never unloaded; libmpv does not survive being unloaded.
@@ -40,6 +43,14 @@ pub fn locate(app: &AppHandle) -> Option<PathBuf> {
 
 fn api(path: &Path) -> Result<&'static Api, String> {
     let loaded = API.get_or_init(|| unsafe {
+        // Vulkan has no system driver on macOS; use the bundled MoltenVK.
+        if let Some(icd) = path.parent().map(|dir| dir.join("MoltenVK_icd.json")).filter(|icd| icd.is_file()) {
+            for name in ["VK_DRIVER_FILES", "VK_ICD_FILENAMES"] {
+                if std::env::var_os(name).is_none() {
+                    std::env::set_var(name, &icd);
+                }
+            }
+        }
         let library = Library::new(path).map_err(|err| format!("Could not load the built-in player ({err})."))?;
         let api = Api {
             create: *library.get::<Create>(b"mpv_create\0").map_err(|err| err.to_string())?,
@@ -49,6 +60,7 @@ fn api(path: &Path) -> Result<&'static Api, String> {
             wait_event: *library.get::<WaitEvent>(b"mpv_wait_event\0").map_err(|err| err.to_string())?,
             destroy: *library.get::<Destroy>(b"mpv_terminate_destroy\0").map_err(|err| err.to_string())?,
             error_string: *library.get::<ErrorString>(b"mpv_error_string\0").map_err(|err| err.to_string())?,
+            request_log: *library.get::<RequestLog>(b"mpv_request_log_messages\0").map_err(|err| err.to_string())?,
         };
         Ok((library, api))
     });
@@ -67,6 +79,62 @@ pub struct LibMpv {
 
 fn cstring(text: &str) -> Result<CString, String> {
     CString::new(text).map_err(|_| "Player option contained a NUL byte.".to_string())
+}
+
+#[repr(C)]
+struct Event {
+    event_id: c_int,
+    error: c_int,
+    reply_userdata: u64,
+    data: *mut c_void,
+}
+
+#[repr(C)]
+struct LogMessage {
+    prefix: *const c_char,
+    level: *const c_char,
+    text: *const c_char,
+    log_level: c_int,
+}
+
+fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("ApiKey=") {
+        out.push_str(&rest[..at + 7]);
+        out.push_str("…");
+        rest = &rest[at + 7..];
+        rest = &rest[rest.find(|c: char| c == '&' || c.is_whitespace()).unwrap_or(rest.len())..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Warnings and errors mpv has queued, oldest first.
+fn drain_messages(api: &Api, raw: *mut c_void) -> Vec<String> {
+    let mut lines = Vec::new();
+    for _ in 0..500 {
+        let event = unsafe { (api.wait_event)(raw, 0.0) as *const Event };
+        if event.is_null() {
+            break;
+        }
+        let event = unsafe { &*event };
+        if event.event_id == 0 {
+            break;
+        }
+        if event.event_id == MPV_EVENT_LOG_MESSAGE && !event.data.is_null() {
+            let message = unsafe { &*(event.data as *const LogMessage) };
+            let text = |ptr: *const c_char| {
+                if ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().trim().to_string()
+                }
+            };
+            lines.push(redact(&format!("[{}] {}", text(message.prefix), text(message.text))));
+        }
+    }
+    lines
 }
 
 /// Turns mpv command-line arguments into libmpv option pairs.
@@ -129,9 +197,14 @@ impl LibMpv {
                 return fail(format!("The built-in player rejected {name} ({}).", describe(code)));
             }
         }
+        if let Ok(level) = cstring("warn") {
+            unsafe { (api.request_log)(raw, level.as_ptr()) };
+        }
         let code = unsafe { (api.initialize)(raw) };
         if code < 0 {
-            return fail(format!("The built-in player could not start ({}).", describe(code)));
+            let details = drain_messages(api, raw);
+            let tail = details[details.len().saturating_sub(6)..].join(" ");
+            return fail(format!("The built-in player could not start ({}). {tail}", describe(code)));
         }
         if let Some(media) = media {
             let (load, target) = (cstring("loadfile")?, cstring(&media)?);
