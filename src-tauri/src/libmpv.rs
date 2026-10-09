@@ -284,6 +284,104 @@ pub fn focus_player(app: &AppHandle) {
     });
 }
 
+const NS_EVENT_MASK_KEY_DOWN: u64 = 1 << 10;
+const NS_SHIFT: usize = 1 << 17;
+const NS_CONTROL: usize = 1 << 18;
+const NS_OPTION: usize = 1 << 19;
+const NS_COMMAND: usize = 1 << 20;
+
+/// mpv name for a key press, or None to leave the event to AppKit.
+fn mpv_key_name(code: u16, chars: &str, flags: usize) -> Option<String> {
+    if flags & NS_COMMAND != 0 {
+        return None;
+    }
+    let special = match code {
+        49 => Some("SPACE"),
+        36 => Some("ENTER"),
+        76 => Some("KP_ENTER"),
+        48 => Some("TAB"),
+        51 => Some("BS"),
+        117 => Some("DEL"),
+        53 => Some("ESC"),
+        123 => Some("LEFT"),
+        124 => Some("RIGHT"),
+        125 => Some("DOWN"),
+        126 => Some("UP"),
+        115 => Some("HOME"),
+        119 => Some("END"),
+        116 => Some("PGUP"),
+        121 => Some("PGDWN"),
+        _ => None,
+    };
+    let base = match special {
+        Some(name) => name.to_string(),
+        None => {
+            let mut chars = chars.chars();
+            let ch = chars.next().filter(|ch| !ch.is_control() && chars.next().is_none())?;
+            if ch == '#' { "SHARP".to_string() } else { ch.to_string() }
+        }
+    };
+    let mut name = String::new();
+    if flags & NS_CONTROL != 0 {
+        name.push_str("Ctrl+");
+    }
+    if flags & NS_OPTION != 0 {
+        name.push_str("Alt+");
+    }
+    if special.is_some() && flags & NS_SHIFT != 0 {
+        name.push_str("Shift+");
+    }
+    name.push_str(&base);
+    Some(name)
+}
+
+/// libmpv only reads the keyboard through mpv's own NSApplication subclass,
+/// which Finplay is not, so keys typed into a player window (embedded or the
+/// fullscreen handoff) would be dropped. Forward them over IPC instead.
+pub fn install_key_forwarding(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || unsafe {
+        let block = block2::RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+            if event.is_null() {
+                return event;
+            }
+            let window: *mut AnyObject = msg_send![event, window];
+            if window.is_null() {
+                return event;
+            }
+            let ours = handle
+                .webview_windows()
+                .values()
+                .any(|webview| webview.ns_window().is_ok_and(|pointer| pointer as usize == window as usize));
+            let panel: bool = msg_send![window, isKindOfClass: objc2::class!(NSPanel)];
+            if ours || panel {
+                return event;
+            }
+            let code: u16 = msg_send![event, keyCode];
+            let flags: usize = msg_send![event, modifierFlags];
+            let text: *mut AnyObject = msg_send![event, charactersIgnoringModifiers];
+            let chars = if text.is_null() {
+                String::new()
+            } else {
+                let utf8: *const c_char = msg_send![text, UTF8String];
+                if utf8.is_null() { String::new() } else { std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned() }
+            };
+            match mpv_key_name(code, &chars, flags) {
+                Some(name) if crate::mpv::forward_key(&handle, &name) => std::ptr::null_mut(),
+                _ => event,
+            }
+        });
+        let monitor: *mut AnyObject = msg_send![
+            objc2::class!(NSEvent),
+            addLocalMonitorForEventsMatchingMask: NS_EVENT_MASK_KEY_DOWN,
+            handler: &*block
+        ];
+        if !monitor.is_null() {
+            let _: *mut AnyObject = msg_send![monitor, retain];
+        }
+    });
+}
+
 impl LibMpv {
     /// `embed` attaches the player as a borderless child over Finplay. When
     /// false, mpv keeps a normal window suitable for Spaces fullscreen (`--fs`).

@@ -899,6 +899,11 @@ local function on_left(event)
         elseif state.menu then
             state.menu = nil
         else
+            -- Remember the state before a click run so a double-click can restore it.
+            if not state.click_at or now() - state.click_at > 1 then
+                state.click_paused = mp.get_property_bool("pause")
+            end
+            state.click_at = now()
             toggle_pause()
         end
         render()
@@ -915,7 +920,12 @@ local function on_double()
     if hit(x, y) or inside(state.seekbar, x, y) then
         return
     end
-    toggle_pause()
+    -- Both clicks of a double-click also arrive as single clicks, and each may
+    -- have toggled pause, so put pause back to how it was before them.
+    if state.click_at and now() - state.click_at < 1 and state.click_paused ~= nil then
+        mp.set_property_bool("pause", state.click_paused)
+    end
+    state.click_at = nil
     toggle_fullscreen()
 end
 

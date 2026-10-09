@@ -21,6 +21,12 @@ export function invalidate(prefix: string) {
   notify(prefix);
 }
 
+/** Like `invalidate`, but keeps showing the old value while the refetch runs. */
+export function markStale(prefix: string) {
+  for (const [key, entry] of store) if (key.startsWith(prefix)) entry.at = 0;
+  notify(prefix);
+}
+
 /**
  * Stale-while-revalidate: returns the last value for `key` immediately and
  * refreshes it in the background, so revisiting a page never starts empty.

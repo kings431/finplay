@@ -12,7 +12,7 @@ mod trailer;
 use downloads::{download_delete, download_dir, download_list, download_progress, download_start};
 use mpv::{player_focus, player_play, player_request, player_stop, player_thumb, PlayerState};
 use stats::open_stats;
-use trailer::play_trailer;
+use trailer::{play_trailer, trailer_stream};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,6 +32,8 @@ pub fn run() {
                     }
                 });
             }
+            #[cfg(target_os = "macos")]
+            libmpv::install_key_forwarding(app.handle());
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 window.on_window_event(|event| {
@@ -61,7 +63,8 @@ pub fn run() {
             download_delete,
             download_progress,
             open_stats,
-            play_trailer
+            play_trailer,
+            trailer_stream
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Finplay")

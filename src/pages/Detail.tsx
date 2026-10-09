@@ -1,7 +1,7 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { IconBack, IconCheck, IconFilm, IconHeart, IconPlay } from "../icons";
-import { playRemoteTrailer } from "../trailer";
+import { playRemoteTrailer, trailerStream } from "../trailer";
 import {
   audioStream,
   backdropUrl,
@@ -40,8 +40,13 @@ function TrailerButton({ item }: { item: BaseItem }) {
       if (local) {
         await play(local, { fromStart: true, returnTo: `/item/${item.Id}` });
       } else if (remote) {
-        const where = await playRemoteTrailer(remote, item.Name);
-        if (where === "window") setNote("Playing in the trailer window.");
+        const stream = await trailerStream(remote);
+        if (stream) {
+          await play(item, { trailerUrl: stream, returnTo: `/item/${item.Id}` });
+        } else {
+          const where = await playRemoteTrailer(remote, item.Name);
+          if (where === "window") setNote("Playing in the trailer window. Install yt-dlp to play trailers in Finplay.");
+        }
       }
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));

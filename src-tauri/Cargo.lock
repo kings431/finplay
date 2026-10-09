@@ -823,8 +823,9 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "finplay"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
+ "block2",
  "dbus",
  "dbus-crossroads",
  "libloading 0.8.9",

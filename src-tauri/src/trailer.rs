@@ -2,17 +2,36 @@
 //! it the trailer opens in its own window, which like the stats window gets no
 //! capabilities and so no access to Finplay's commands.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 const LABEL: &str = "trailer";
 
-fn on_path(names: &[&str]) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else { return false };
-    std::env::split_paths(&paths).any(|dir| {
-        names.iter().any(|name| {
-            dir.join(name).is_file() || (cfg!(windows) && dir.join(format!("{name}.exe")).is_file())
+/// yt-dlp (or youtube-dl) for mpv's ytdl hook. Apps started from Finder don't
+/// inherit the shell PATH, so Homebrew's folders are checked too.
+pub fn ytdl_path() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).collect()).unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+    ["yt-dlp", "youtube-dl"].iter().find_map(|name| {
+        dirs.iter().find_map(|dir| {
+            let path = dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_string() });
+            path.is_file().then_some(path)
         })
+    })
+}
+
+/// The address the in-app player should open for a remote trailer, or None
+/// when mpv cannot stream it (no yt-dlp) and the trailer window must be used.
+#[tauri::command]
+pub fn trailer_stream(url: String) -> Option<String> {
+    let parsed = Url::parse(url.trim()).ok().filter(|url| matches!(url.scheme(), "http" | "https"))?;
+    ytdl_path()?;
+    Some(match youtube_id(&parsed) {
+        Some(id) => format!("https://www.youtube.com/watch?v={id}"),
+        None => parsed.to_string(),
     })
 }
 
@@ -52,7 +71,7 @@ pub async fn play_trailer(app: AppHandle, url: String, title: String, mpv_path: 
     let title: String = title.chars().filter(|ch| !ch.is_control()).take(160).collect();
     let heading = if title.is_empty() { "Trailer".to_string() } else { format!("{title} · Trailer") };
 
-    if on_path(&["yt-dlp", "youtube-dl"]) {
+    if ytdl_path().is_some() {
         let mut command = Command::new(crate::mpv::mpv_binary(&app, &mpv_path));
         command
             .arg("--force-window=immediate")

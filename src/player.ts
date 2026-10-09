@@ -24,6 +24,8 @@ export type PlayRequest = {
   artist: string;
   /** Shown by desktop media widgets, so it must never carry the access token. */
   artUrl: string;
+  /** A remote trailer streamed through yt-dlp. */
+  trailer?: boolean;
 };
 
 export async function listenNext(handler: () => void) {

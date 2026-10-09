@@ -156,6 +156,9 @@ pub struct PlayRequest {
     /// Plays the downloaded file for this item instead of `url`.
     #[serde(default)]
     download_id: String,
+    /// A remote (YouTube) trailer streamed through yt-dlp.
+    #[serde(default)]
+    trailer: bool,
 }
 
 fn default_one() -> f64 {
@@ -413,6 +416,17 @@ pub fn control(app: &AppHandle, control: Control) {
     fire(&shared, command);
 }
 
+/// Sends a key (mpv key name) to the running player. False if nothing plays.
+#[cfg(target_os = "macos")]
+pub fn forward_key(app: &AppHandle, key: &str) -> bool {
+    let Some(state) = app.try_state::<PlayerState>() else { return false };
+    let Some(shared) = lock(&state.inner).as_ref().map(|session| Arc::clone(&session.shared)) else {
+        return false;
+    };
+    fire(&shared, json!(["keypress", key]));
+    true
+}
+
 #[tauri::command]
 pub async fn player_request(
     state: State<'_, PlayerState>,
@@ -560,6 +574,15 @@ fn start_player(
         .take(2000)
         .collect();
     let mpv_path = mpv_binary(&app, &request.mpv_path);
+    let ytdl = if request.trailer {
+        let path = crate::trailer::ytdl_path().ok_or_else(|| "Trailers need yt-dlp to play in Finplay.".to_string())?;
+        path.to_str()
+            .filter(|text| !text.contains(',') && !text.chars().any(|ch| ch.is_control()))
+            .map(str::to_string)
+            .ok_or_else(|| "The yt-dlp path is not usable.".to_string())?
+    } else {
+        String::new()
+    };
 
     let sock = ipc_path();
     #[cfg(unix)]
@@ -591,11 +614,12 @@ fn start_player(
         format!("--input-ipc-server={sock}"),
         format!("--script={}", script_path.display()),
         format!(
-            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={}",
+            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={}{}",
             if wid.is_some() { "yes" } else { "no" },
             if handoff { "yes" } else { "no" },
             if request.trickplay { "yes" } else { "no" },
-            if request.auto_skip { "yes" } else { "no" }
+            if request.auto_skip { "yes" } else { "no" },
+            if ytdl.is_empty() { String::new() } else { format!(",ytdl_hook-ytdl_path={ytdl}") }
         ),
         format!("--title=Finplay — {title}"),
         format!("--force-media-title={title}"),
@@ -668,6 +692,12 @@ fn start_player(
     };
     if (speed - 1.0).abs() > 0.01 {
         args.push(format!("--speed={speed}"));
+    }
+    if request.trailer {
+        // Quit at the end so Finplay returns to the title instead of a frozen frame.
+        args.push("--keep-open=no".into());
+        args.push("--ytdl=yes".into());
+        args.push("--ytdl-format=bestvideo[height<=?1080]+bestaudio/best".into());
     }
     args.extend(carry);
     args.push("--".into());

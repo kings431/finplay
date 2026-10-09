@@ -55,7 +55,7 @@ export function Playing() {
         <p className="eyebrow">{active.badge}</p>
         <h1>{active.item.SeriesName ? `${active.item.SeriesName}` : active.item.Name}</h1>
         {active.item.SeriesName ? <p className="playing-sub">{active.item.Name}</p> : null}
-        <p className="fine">{finished ? "Finished" : methodHint(active.method)} Picture is in the player window.</p>
+        <p className="fine">{finished ? "Finished" : active.trailer ? "Trailer, streamed from YouTube." : methodHint(active.method)} Picture is in the player window.</p>
         <div className="scrub-row">
           <span>{formatClock(shown)}</span>
           <input

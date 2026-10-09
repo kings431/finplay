@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Jellyfin } from "./jellyfin";
 import { useSession } from "./session";
 import { loadSettings } from "./settings";
-import { invalidate } from "./cache";
+import { invalidate, markStale } from "./cache";
 import { listenNext, listenPlayer, listenThumbRequests, playerFocus, playerPlay, playerRequest, playerStop, inTauri } from "./player";
 import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
@@ -38,6 +38,8 @@ export type ActivePlayback = {
   returnTo?: string;
   /** Live TV tuner stream, closed by the server when the stop report names it. */
   liveStreamId?: string;
+  /** A remote trailer for `item`; nothing is reported to Jellyfin. */
+  trailer?: boolean;
 };
 
 type PlaybackContextValue = {
@@ -64,6 +66,8 @@ export type PlayOptions = {
   returnTo?: string;
   /** Starts exactly here, in seconds, with no resume prompt. */
   startAt?: number;
+  /** Plays this remote trailer (a `trailerStream` address) for the item instead. */
+  trailerUrl?: string;
 };
 
 type ResumeAsk = { item: BaseItem; seconds: number; resolve: (choice: "resume" | "start" | null) => void };
@@ -151,6 +155,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   const report = useCallback(
     async (playback: ActivePlayback, event: "start" | "progress" | "stop", seconds: number, isPaused = false) => {
+      if (playback.trailer) return;
       const delivered = statusRef.current === "ready" && (await sendReport(playback, event, seconds, isPaused));
       if (playback.local) {
         const total = playback.duration || ticksToSeconds(playback.item.RunTimeTicks);
@@ -173,9 +178,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         stopSent.current = true;
         await report(current, "stop", positionRef.current, false);
       }
-      // Resume/progress just landed on the server — drop the home snapshot so
-      // Continue Watching refetches instead of painting the pre-watch row.
-      invalidate("home:");
+      // Resume/progress just landed on the server. Home keeps painting its last
+      // snapshot (the hero stays instant) while Continue Watching refetches.
+      markStale("home:");
       invalidate(`item:${current.item.Id}`);
       if (current.item.SeriesId) invalidate(`item:${current.item.SeriesId}`);
       if (navigateAway) {
@@ -267,7 +272,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       const launch = async (
         playback: ActivePlayback,
         startSeconds: number,
-        media: { url: string; downloadId?: string; trickplay: boolean; segments: string; next?: BaseItem; artUrl: string },
+        media: { url: string; downloadId?: string; trickplay: boolean; segments: string; next?: BaseItem; artUrl: string; title?: string },
       ) => {
         nextRef.current = media.next ?? null;
         stopSent.current = false;
@@ -283,7 +288,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           await playerPlay({
             url: media.url,
             downloadId: media.downloadId,
-            title: playbackTitle(playback.item),
+            title: media.title ?? playbackTitle(playback.item),
             startSeconds,
             fullscreen: settings.fullscreen,
             audioLang: settings.audioLanguage,
@@ -301,6 +306,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             autoSkip: settings.autoSkipIntro,
             artist: playback.item.SeriesName ?? (playback.item.ProductionYear ? String(playback.item.ProductionYear) : ""),
             artUrl: media.artUrl,
+            trailer: playback.trailer,
           });
           void playerFocus();
         } catch (err) {
@@ -361,6 +367,32 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       };
 
       try {
+        if (options?.trailerUrl) {
+          trickplayRef.current?.dispose();
+          trickplayRef.current = null;
+          await launch(
+            {
+              item,
+              playSessionId: crypto.randomUUID(),
+              mediaSourceId: item.Id,
+              method: "DirectStream",
+              badge: "Trailer",
+              baseTicks: 0,
+              duration: 0,
+              returnTo: options.returnTo,
+              trailer: true,
+            },
+            0,
+            {
+              url: options.trailerUrl,
+              trickplay: false,
+              segments: "",
+              artUrl: `${client.auth.server}/Items/${item.Id}/Images/Primary?maxHeight=400`,
+              title: `${item.Name} · Trailer`,
+            },
+          );
+          return;
+        }
         const download = downloadsRef.current.find(item.Id);
         if (download?.state === "done") {
           await playDownload(download);
