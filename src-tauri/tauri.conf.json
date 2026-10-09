@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Finplay",
+  "version": "0.2.0",
+  "identifier": "com.finplay.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Finplay",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "resizable": true,
+        "center": true,
+        "backgroundColor": "#000000"
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/downloads/**"
+        ]
+      },
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://asset.localhost blob: data: http: https:; media-src 'self' blob: http: https:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http: https: ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "category": "Video",
+    "shortDescription": "A Jellyfin client that plays through mpv",
+    "longDescription": "Finplay is a desktop Jellyfin client with a streaming-service style interface. Video plays in mpv, so most files direct-play without transcoding.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "mpv"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "mpv"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCQ0U2MzZEMDIxNEYzNDgKUldSSTh4UUNiV1BPYTFaN0l0UEJubEpLNUtNaUV6cEp4MUZYQld1TzQ2NzZZYzZuK3BEbUU5ZWoK",
+      "endpoints": [
+        "https://github.com/kings431/finplay/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
