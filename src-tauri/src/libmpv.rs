@@ -1,9 +1,9 @@
 //! Runs mpv inside Finplay through libmpv. mpv's macOS video outputs ignore
-//! `--wid` and always open their own window, so in windowed mode that window is
-//! made a borderless child of Finplay and laid over the content area.
+//! `--wid` and always open their own window, so in windowed mode mpv's video
+//! view is moved into Finplay's window and mpv's own window is kept hidden.
 //!
-//! Fullscreen cannot use that child relationship: AppKit refuses Spaces
-//! fullscreen on borderless child windows (NSGenericException / hard crash).
+//! Fullscreen cannot use that arrangement: AppKit refuses Spaces fullscreen on
+//! the borrowed borderless window (NSGenericException / hard crash).
 //! IINA avoids this by owning the NSWindow; Finplay instead hands off to a
 //! normal standalone mpv window with `--fs` (same idea as the Linux Wayland
 //! handoff). AppKit window pointers are only usable in-process. The bundled
@@ -16,12 +16,15 @@ use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 const MPV_EVENT_SHUTDOWN: c_int = 1;
 const MPV_EVENT_LOG_MESSAGE: c_int = 2;
+const MPV_EVENT_CLIENT_MESSAGE: c_int = 16;
+const MPV_EVENT_VIDEO_RECONFIG: c_int = 17;
 
 type Create = unsafe extern "C" fn() -> *mut c_void;
 type SetOption = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
@@ -109,6 +112,33 @@ struct Event {
 }
 
 #[repr(C)]
+struct ClientMessage {
+    num_args: c_int,
+    args: *const *const c_char,
+}
+
+/// First argument of a `script-message` event, if `event` is one.
+unsafe fn client_message(event: *const c_int) -> Option<String> {
+    let event = &*(event as *const Event);
+    if event.data.is_null() {
+        return None;
+    }
+    let message = &*(event.data as *const ClientMessage);
+    if message.num_args < 1 || message.args.is_null() || (*message.args).is_null() {
+        return None;
+    }
+    Some(std::ffi::CStr::from_ptr(*message.args).to_string_lossy().into_owned())
+}
+
+/// Hides the cursor over the embedded video until the mouse moves.
+fn hide_cursor() {
+    let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if attached.is_some_and(|embed| shows_video(embed.host)) {
+        let _: () = unsafe { msg_send![objc2::class!(NSCursor), setHiddenUntilMouseMoves: true] };
+    }
+}
+
+#[repr(C)]
 struct LogMessage {
     prefix: *const c_char,
     level: *const c_char,
@@ -190,10 +220,31 @@ unsafe impl Encode for Rect {
 }
 
 const NS_WINDOW_ABOVE: isize = 1;
+const NS_VIEW_WIDTH_SIZABLE: usize = 1 << 1;
+const NS_VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
 
-/// (player NSWindow, Finplay NSWindow) while the player is attached.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct CgColor(*const c_void);
+
+unsafe impl Encode for CgColor {
+    const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[]));
+}
+
+/// The embedded player's AppKit objects. mpv draws into `video`, its own
+/// view, which Finplay moves into its window; mpv's window (`player`) stays
+/// hidden but sized like the video, since mpv sizes its output from it.
 /// Only touched on the main thread, as AppKit requires.
-static ATTACHED: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+#[derive(Clone, Copy, PartialEq)]
+struct Embed {
+    player: usize,
+    host: usize,
+    video: usize,
+    /// Black backing for the title bar strip above the video.
+    backdrop: usize,
+}
+
+static ATTACHED: Mutex<Option<Embed>> = Mutex::new(None);
 
 fn host_window(app: &AppHandle) -> Option<usize> {
     let window = app.get_webview_window("main")?;
@@ -219,69 +270,230 @@ fn rect_near(a: Rect, b: Rect) -> bool {
     near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height)
 }
 
-/// Lays the player window over the host's content area.
-/// Exact f64 equality is avoided: AppKit often returns a slightly different
-/// frame after `setFrame`, which would otherwise resize forever.
-unsafe fn place(player: usize, host: usize) {
-    let (player, host) = (player as *mut AnyObject, host as *mut AnyObject);
+/// Picture-in-picture: the player leaves Finplay and floats above every app
+/// in a corner of the screen, so it stays visible while other apps are used.
+static MINI: AtomicBool = AtomicBool::new(false);
+/// Set once the floating player has been placed; the user may then drag it.
+static MINI_PLACED: AtomicBool = AtomicBool::new(false);
+const MINI_MARGIN: f64 = 20.0;
+const NS_NORMAL_WINDOW_LEVEL: isize = 0;
+const NS_FLOATING_WINDOW_LEVEL: isize = 3;
+const NS_COLLECTION_ALL_SPACES: usize = 1 << 0;
+const NS_COLLECTION_FULLSCREEN_AUXILIARY: usize = 1 << 8;
+
+unsafe fn mini_rect(host: *mut AnyObject) -> Rect {
+    let screen: *mut AnyObject = msg_send![host, screen];
+    let area: Rect = if screen.is_null() { msg_send![host, frame] } else { msg_send![screen, visibleFrame] };
+    let width = (area.width * 0.22).clamp(320.0, 480.0).min(area.width - 2.0 * MINI_MARGIN).max(1.0);
+    let height = width * 9.0 / 16.0;
+    Rect {
+        x: area.x + area.width - width - MINI_MARGIN,
+        y: area.y + MINI_MARGIN,
+        width,
+        height,
+    }
+}
+
+/// Finplay's content area in screen coordinates, below the overlaid title bar.
+unsafe fn content_rect(host: *mut AnyObject) -> Rect {
     let frame: Rect = msg_send![host, frame];
-    let content: Rect = msg_send![host, contentRectForFrameRect: frame];
-    let current: Rect = msg_send![player, frame];
-    if !rect_near(current, content) {
-        let _: () = msg_send![player, setFrame: content, display: true];
+    let layout: Rect = msg_send![host, contentLayoutRect];
+    Rect { x: frame.x + layout.x, y: frame.y + layout.y, width: layout.width, height: layout.height }
+}
+
+/// mpv's video view: the subview of its window backed by a Metal layer.
+unsafe fn video_view(player: *mut AnyObject) -> Option<*mut AnyObject> {
+    let content: *mut AnyObject = msg_send![player, contentView];
+    if content.is_null() {
+        return None;
+    }
+    let subviews: *mut AnyObject = msg_send![content, subviews];
+    let count: usize = msg_send![subviews, count];
+    let metal = objc2::runtime::AnyClass::get(c"CAMetalLayer");
+    let mut first = None;
+    for index in 0..count {
+        let view: *mut AnyObject = msg_send![subviews, objectAtIndex: index];
+        first.get_or_insert(view);
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if let (false, Some(metal)) = (layer.is_null(), metal) {
+            let is_metal: bool = msg_send![layer, isKindOfClass: metal];
+            if is_metal {
+                return Some(view);
+            }
+        }
+    }
+    first
+}
+
+unsafe fn make_backdrop() -> *mut AnyObject {
+    let view: *mut AnyObject = msg_send![objc2::class!(NSView), alloc];
+    let zero = Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    let view: *mut AnyObject = msg_send![view, initWithFrame: zero];
+    let _: () = msg_send![view, setWantsLayer: true];
+    let layer: *mut AnyObject = msg_send![view, layer];
+    let black: *mut AnyObject = msg_send![objc2::class!(NSColor), blackColor];
+    let color: CgColor = msg_send![black, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: color];
+    let _: () = msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+    view
+}
+
+/// Moves `view` into `parent` (on top) and sizes it, unless already there.
+unsafe fn adopt(parent: *mut AnyObject, view: *mut AnyObject, frame: Rect, above: *mut AnyObject) {
+    let current: *mut AnyObject = msg_send![view, superview];
+    if current != parent {
+        let _: () = msg_send![parent, addSubview: view, positioned: NS_WINDOW_ABOVE, relativeTo: above];
+    }
+    let now: Rect = msg_send![view, frame];
+    if !rect_near(now, frame) {
+        let _: () = msg_send![view, setFrame: frame];
+    }
+}
+
+/// Shows the video inside Finplay below the title bar, or floating in mpv's
+/// own window while mini.
+unsafe fn place(embed: Embed) {
+    let player = embed.player as *mut AnyObject;
+    let host = embed.host as *mut AnyObject;
+    let video = embed.video as *mut AnyObject;
+    let backdrop = embed.backdrop as *mut AnyObject;
+    let parent: *mut AnyObject = msg_send![player, parentWindow];
+    if !parent.is_null() {
+        let _: () = msg_send![parent, removeChildWindow: player];
+    }
+    if MINI.load(Ordering::SeqCst) {
+        let _: () = msg_send![backdrop, removeFromSuperview];
+        let content: *mut AnyObject = msg_send![player, contentView];
+        let bounds: Rect = msg_send![content, bounds];
+        adopt(content, video, bounds, std::ptr::null_mut());
+        let _: () = msg_send![player, setLevel: NS_FLOATING_WINDOW_LEVEL];
+        let _: () = msg_send![player, setCollectionBehavior: NS_COLLECTION_ALL_SPACES | NS_COLLECTION_FULLSCREEN_AUXILIARY];
+        let _: () = msg_send![player, setHasShadow: true];
+        let _: () = msg_send![player, setMovableByWindowBackground: true];
+        if !MINI_PLACED.swap(true, Ordering::SeqCst) {
+            let _: () = msg_send![player, setFrame: mini_rect(host), display: true];
+        }
+        let _: () = msg_send![player, orderFront: std::ptr::null_mut::<AnyObject>()];
+        return;
+    }
+    MINI_PLACED.store(false, Ordering::SeqCst);
+    let content: *mut AnyObject = msg_send![host, contentView];
+    let bounds: Rect = msg_send![content, bounds];
+    let layout: Rect = msg_send![host, contentLayoutRect];
+    let below_title: Rect = msg_send![content, convertRect: layout, fromView: std::ptr::null_mut::<AnyObject>()];
+    adopt(content, backdrop, bounds, std::ptr::null_mut());
+    adopt(content, video, below_title, backdrop);
+    let _: () = msg_send![player, orderOut: std::ptr::null_mut::<AnyObject>()];
+    let _: () = msg_send![player, setLevel: NS_NORMAL_WINDOW_LEVEL];
+    let _: () = msg_send![player, setCollectionBehavior: 0usize];
+    let _: () = msg_send![player, setMovableByWindowBackground: false];
+    let size = content_rect(host);
+    let frame: Rect = msg_send![player, frame];
+    if !rect_near(frame, size) {
+        let _: () = msg_send![player, setFrame: size, display: false];
+    }
+}
+
+/// Moves the embedded player between filling Finplay and floating mini.
+/// False when there is no embedded player to move.
+pub fn set_mini(app: &AppHandle, on: bool) -> bool {
+    let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if on && attached.is_none() {
+        return false;
+    }
+    MINI.store(on, Ordering::SeqCst);
+    MINI_PLACED.store(false, Ordering::SeqCst);
+    let Some(embed) = attached else { return true };
+    let _ = app.run_on_main_thread(move || unsafe {
+        place(embed);
+        let _: () = msg_send![embed.host as *mut AnyObject, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+    });
+    true
+}
+
+/// Leaves mini mode, returning whether it was on.
+pub fn take_mini() -> bool {
+    MINI_PLACED.store(false, Ordering::SeqCst);
+    MINI.swap(false, Ordering::SeqCst)
+}
+
+pub fn is_mini() -> bool {
+    MINI.load(Ordering::SeqCst)
+}
+
+/// Puts the video view back in mpv's window so mpv can tear it down as usual.
+unsafe fn release(embed: Embed) {
+    let player = embed.player as *mut AnyObject;
+    let video = embed.video as *mut AnyObject;
+    let backdrop = embed.backdrop as *mut AnyObject;
+    let _: () = msg_send![backdrop, removeFromSuperview];
+    let _: () = msg_send![backdrop, release];
+    let content: *mut AnyObject = msg_send![player, contentView];
+    if !content.is_null() {
+        let bounds: Rect = msg_send![content, bounds];
+        adopt(content, video, bounds, std::ptr::null_mut());
     }
 }
 
 fn attach(app: &AppHandle, player: usize) {
     let Some(host) = host_window(app) else { return };
-    // AppKit may send window events synchronously; never hold the lock across it.
-    let previous = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host));
-    let fresh = previous != Some((player, host));
+    let previous = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
-        if let Some((old_player, old_host)) = previous {
-            if old_player != player || old_host != host {
-                let (window, parent) = (old_player as *mut AnyObject, old_host as *mut AnyObject);
-                let _: () = msg_send![parent, removeChildWindow: window];
-            }
+        if let Some(embed) = previous.filter(|embed| embed.player == player && embed.host == host) {
+            place(embed);
+            return;
         }
-        if fresh {
-            let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
-            let _: () = msg_send![window, setHasShadow: false];
-            let _: () = msg_send![parent, addChildWindow: window, ordered: NS_WINDOW_ABOVE];
-            let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        let Some(video) = video_view(player as *mut AnyObject) else { return };
+        if let Some(old) = previous {
+            release(old);
         }
-        place(player, host);
+        let window = player as *mut AnyObject;
+        let _: () = msg_send![window, setExcludedFromWindowsMenu: true];
+        let _: () = msg_send![window, setHasShadow: false];
+        let embed = Embed { player, host, video: video as usize, backdrop: make_backdrop() as usize };
+        // AppKit may send window events synchronously; never hold the lock across it.
+        *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(embed);
+        place(embed);
+        let _: () = msg_send![host as *mut AnyObject, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
     }
 }
 
 fn detach() {
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-    let Some((player, host)) = attached else { return };
+    let Some(embed) = attached else { return };
     unsafe {
-        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
-        let _: () = msg_send![parent, removeChildWindow: window];
-        let _: () = msg_send![parent, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        release(embed);
+        let _: () = msg_send![embed.host as *mut AnyObject, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
     }
 }
 
-/// Keeps the player covering Finplay's content after the window moves or
-/// resizes. Call on the main thread. No-op while the player is a standalone
+/// Keeps the video and mpv's hidden window matched to Finplay after it moves
+/// or resizes. Call on the main thread. No-op while the player is a standalone
 /// fullscreen window (not attached).
 pub fn follow_host() {
     let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((player, host)) = attached {
-        unsafe { place(player, host) };
+    if let Some(embed) = attached {
+        unsafe { place(embed) };
     }
 }
 
-/// Brings keyboard focus to the embedded player window (macOS).
+/// Gives Finplay keyboard focus while the video is shown inside it; keys are
+/// then forwarded to mpv (see `install_key_forwarding`).
 pub fn focus_player(app: &AppHandle) {
     let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some((player, _host)) = attached else { return };
+    let Some(embed) = attached else { return };
+    if is_mini() {
+        return;
+    }
     let _ = app.run_on_main_thread(move || unsafe {
-        let window = player as *mut AnyObject;
-        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        let _: () = msg_send![embed.host as *mut AnyObject, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
     });
+}
+
+/// Whether keys typed into `window` belong to the embedded video.
+fn shows_video(window: usize) -> bool {
+    let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    attached.is_some_and(|embed| embed.host == window) && !is_mini()
 }
 
 const NS_EVENT_MASK_KEY_DOWN: u64 = 1 << 10;
@@ -354,7 +566,7 @@ pub fn install_key_forwarding(app: &AppHandle) {
                 .values()
                 .any(|webview| webview.ns_window().is_ok_and(|pointer| pointer as usize == window as usize));
             let panel: bool = msg_send![window, isKindOfClass: objc2::class!(NSPanel)];
-            if ours || panel {
+            if (ours && !shows_video(window as usize)) || panel {
                 return event;
             }
             let code: u16 = msg_send![event, keyCode];
@@ -416,6 +628,9 @@ impl LibMpv {
                 ("title-bar".to_string(), "no".to_string()),
                 ("auto-window-resize".to_string(), "no".to_string()),
                 ("keepaspect-window".to_string(), "no".to_string()),
+                // mpv's window stays hidden, so it would otherwise stop drawing.
+                ("force-render".to_string(), "yes".to_string()),
+                ("window-dragging".to_string(), "no".to_string()),
             ]);
         }
         // Standalone / fullscreen keeps mpv's normal titled window so AppKit
@@ -466,8 +681,27 @@ impl LibMpv {
         std::thread::spawn(move || {
             loop {
                 let event = unsafe { (api.wait_event)(events as *mut c_void, -1.0) };
-                if !event.is_null() && unsafe { *event } == MPV_EVENT_SHUTDOWN {
-                    break;
+                if event.is_null() {
+                    continue;
+                }
+                match unsafe { *event } {
+                    MPV_EVENT_SHUTDOWN => break,
+                    MPV_EVENT_CLIENT_MESSAGE => {
+                        if unsafe { client_message(event) }.as_deref() == Some("finplay-hide-cursor") {
+                            let _ = events_app.run_on_main_thread(hide_cursor);
+                        }
+                    }
+                    // mpv resizes its own window to suit new video; pull it back over Finplay.
+                    MPV_EVENT_VIDEO_RECONFIG => {
+                        let app = events_app.clone();
+                        std::thread::spawn(move || {
+                            for delay in [0, 300] {
+                                std::thread::sleep(Duration::from_millis(delay));
+                                let _ = app.run_on_main_thread(follow_host);
+                            }
+                        });
+                    }
+                    _ => {}
                 }
             }
             // Queued ahead of mpv closing its window on the main thread.

@@ -8,13 +8,20 @@ import { usePlayback } from "../playback";
 import { useCached } from "../cache";
 import { useClient, useSession } from "../session";
 import type { Jellyfin } from "../jellyfin";
-import type { BaseItem, ItemList, SeerrResult } from "../types";
+import { loadSettings } from "../settings";
+import type { BaseItem, HeroSource, ItemList, SeerrResult, Settings } from "../types";
 
 const BROWSE = "Movie,Series";
+/** Rows never page, and counting matches can double a query's time on a big library. */
+const NO_COUNT = { EnableTotalRecordCount: "false" };
 const DECADES = [1970, 1980, 1990, 2000, 2010];
 const GENRE_ROWS = 6;
 const DISCOVERY_MAX_AGE = 20 * 60 * 1000;
+/** Ratings barely move, and sorting the whole library by them is the slowest query on Home. */
+const TOP_MAX_AGE = 6 * 60 * 60 * 1000;
 const HERO_INTERVAL = 7000;
+const HERO_COUNT = 8;
+const HERO_LEAD: Partial<Record<HeroSource, number>> = { resume: 2, nextUp: 1 };
 /** Quiet time after the last wheel event that ends a swipe gesture. */
 const SWIPE_SETTLE = 150;
 /** Shortest time between two swipe steps. */
@@ -29,20 +36,29 @@ type HomeRow = {
   min?: number;
 };
 
+/** Remounting Home (coming back from another page) keeps the same highlights and position. */
+let heroMemory: { key: string; heroes: BaseItem[]; index: number } | null = null;
+
 export function Home() {
   const client = useClient();
   const session = useSession();
   const { play, busy } = usePlayback();
   const navigate = useNavigate();
-  const [heroIndex, setHeroIndex] = useState(0);
   const [paused, setPaused] = useState(false);
-  const { data, error, loading } = useCached(`home:${session.userId}`, async () => {
-    const [resumeList, nextList, latestMovies, latestShows, picks] = await Promise.all([
+  const [{ heroSources, heroTypes, heroAutoAdvance }] = useState(loadSettings);
+  const wantPicks = heroSources.includes("picks");
+  const wantFavorites = heroSources.includes("favorites");
+  const heroKey = `${session.userId}:${heroSources.join(",")}:${heroTypes}`;
+  const remembered = heroMemory?.key === heroKey ? heroMemory : null;
+  const [heroIndex, setHeroIndex] = useState(remembered?.index ?? 0);
+  const { data, error, loading } = useCached(`home:${session.userId}:${heroTypes}:${wantPicks ? "p" : ""}${wantFavorites ? "f" : ""}`, async () => {
+    const [resumeList, nextList, latestMovies, latestShows, picks, favorites] = await Promise.all([
       client.resume(),
       client.nextUp(),
       client.latest(undefined, "Movie"),
       client.latest(undefined, "Series"),
-      heroPicks(client),
+      wantPicks ? heroPicks(client, heroTypes) : Promise.resolve([]),
+      wantFavorites ? heroFavorites(client, heroTypes) : Promise.resolve([]),
     ]);
     return {
       resume: resumeList.Items ?? [],
@@ -50,13 +66,15 @@ export function Home() {
       movies: latestMovies ?? [],
       shows: latestShows ?? [],
       picks,
+      favorites,
     };
-  });
+  }, { persist: true });
   const resume = data?.resume ?? [];
   const nextUp = data?.nextUp ?? [];
   const movies = data?.movies ?? [];
   const shows = data?.shows ?? [];
-  const more = useCached(`home-more:${session.userId}`, () => discoveryRows(client), { maxAge: DISCOVERY_MAX_AGE });
+  const more = useCached(`home-more:${session.userId}`, () => discoveryRows(client), { maxAge: DISCOVERY_MAX_AGE, persist: true });
+  const topTen = useCached(`home-top:${session.userId}`, () => topRow(client), { maxAge: TOP_MAX_AGE, persist: true });
   const discover = useCached(session.seerr ? `home-discover:${session.userId}` : null, () =>
     client.seerrDiscover("trending").then((found) => (found.results ?? []).filter((result) => result.mediaType === "movie" || result.mediaType === "tv")),
   );
@@ -65,13 +83,25 @@ export function Home() {
   const trending = requested ?? discover.data ?? [];
   const picker = useSeerrPicker((mediaType, id) => setRequested(markRequested(trending, mediaType, id)));
 
-  const candidates = dedupe([...resume.slice(0, 2), ...nextUp.slice(0, 1), ...(data?.picks ?? []), ...movies])
+  const heroFrom: Record<HeroSource, BaseItem[]> = {
+    resume,
+    nextUp,
+    picks: data?.picks ?? [],
+    latest: interleave(movies, shows),
+    favorites: data?.favorites ?? [],
+  };
+  // Alone, a source may fill the hero; mixed, watching rows only lead it off.
+  const heroCap = (source: HeroSource) => (heroSources.length === 1 ? HERO_COUNT : HERO_LEAD[source] ?? HERO_COUNT);
+  const candidates = dedupe(heroSources.flatMap((source) => heroFrom[source].filter((item) => heroType(item, heroTypes)).slice(0, heroCap(source))))
     .filter((item) => item.BackdropImageTags?.length || item.ParentBackdropImageTags?.length)
-    .slice(0, 8);
-  const [heroes, setHeroes] = useState<BaseItem[]>([]);
+    .slice(0, HERO_COUNT);
+  const [heroes, setHeroes] = useState<BaseItem[]>(() => remembered?.heroes ?? candidates);
   useEffect(() => {
     if (heroes.length === 0 && candidates.length > 0) setHeroes(candidates);
   }, [heroes.length, candidates.length]);
+  useEffect(() => {
+    if (heroes.length) heroMemory = { key: heroKey, heroes, index: heroIndex };
+  }, [heroKey, heroes, heroIndex]);
   const hero = heroes[heroIndex] ?? heroes[0];
   const stepHero = (delta: number) => {
     if (heroes.length <= 1) return;
@@ -89,8 +119,8 @@ export function Home() {
 
   const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
   const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
-  const top = more.data?.find((row) => row.key === "top");
-  const rows = (more.data ?? []).filter((row) => row !== top);
+  const top = topTen.data && topTen.data.items.length >= 5 ? topTen.data : undefined;
+  const rows = (more.data ?? []).filter((row) => row.key !== "top");
 
   return (
     <div className="home">
@@ -153,7 +183,7 @@ export function Home() {
           <div className="hero-dots">
             {heroes.map((item, index) => (
               <button key={item.Id} className={index === heroIndex ? "on" : ""} onClick={() => setHeroIndex(index)} aria-label={item.Name}>
-                {index === heroIndex ? (
+                {index === heroIndex && heroAutoAdvance ? (
                   <span
                     key={heroIndex}
                     style={{ animationDuration: `${HERO_INTERVAL}ms` }}
@@ -228,17 +258,15 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
   const decade = DECADES[Math.floor(Math.random() * DECADES.length)];
   const today = new Date();
   const recentCutoff = new Date(today.getFullYear() - 2, today.getMonth(), today.getDate()).toISOString();
-  const [serverName, history, top, unseen, fresh, binge, acclaimed, collections, favorites, era, genreList] = await Promise.all([
-    client.serverName().catch(() => ""),
-    items(client.items({ includeItemTypes: "Movie,Episode", sortBy: "DatePlayed", sortOrder: "Descending", filters: "IsPlayed", limit: 40 })),
-    items(client.items({ includeItemTypes: BROWSE, sortBy: "CommunityRating,SortName", sortOrder: "Descending", limit: 10, extra: { MinCommunityRating: "1" } })),
-    items(client.items({ includeItemTypes: "Movie", filters: "IsUnplayed", sortBy: "Random", limit: 24 })),
-    items(client.items({ includeItemTypes: BROWSE, sortBy: "PremiereDate", sortOrder: "Descending", limit: 24, extra: { MinPremiereDate: recentCutoff, MaxPremiereDate: today.toISOString() } })),
-    items(client.items({ includeItemTypes: "Series", filters: "IsUnplayed", sortBy: "Random", limit: 24, extra: { MinCommunityRating: "7.5" } })),
-    items(client.items({ includeItemTypes: "Movie", sortBy: "Random", limit: 24, extra: { MinCriticRating: "85" } })),
-    items(client.items({ includeItemTypes: "BoxSet", sortBy: "Random", limit: 24 })),
-    items(client.items({ includeItemTypes: BROWSE, filters: "IsFavorite", sortBy: "Random", limit: 24 })),
-    items(client.items({ includeItemTypes: BROWSE, sortBy: "Random", limit: 24, years: decadeYears(decade) })),
+  const [history, unseen, fresh, binge, acclaimed, collections, favorites, era, genreList] = await Promise.all([
+    items(client.items({ slim: true, includeItemTypes: "Movie,Episode", sortBy: "DatePlayed", sortOrder: "Descending", filters: "IsPlayed", limit: 40, extra: NO_COUNT })),
+    items(client.items({ slim: true, includeItemTypes: "Movie", filters: "IsUnplayed", sortBy: "Random", limit: 24, extra: NO_COUNT })),
+    items(client.items({ slim: true, includeItemTypes: BROWSE, sortBy: "PremiereDate", sortOrder: "Descending", limit: 24, extra: { MinPremiereDate: recentCutoff, MaxPremiereDate: today.toISOString(), ...NO_COUNT } })),
+    items(client.items({ slim: true, includeItemTypes: "Series", filters: "IsUnplayed", sortBy: "Random", limit: 24, extra: { MinCommunityRating: "7.5", ...NO_COUNT } })),
+    items(client.items({ slim: true, includeItemTypes: "Movie", sortBy: "Random", limit: 24, extra: { MinCriticRating: "85", ...NO_COUNT } })),
+    items(client.items({ slim: true, includeItemTypes: "BoxSet", sortBy: "Random", limit: 24, extra: NO_COUNT })),
+    items(client.items({ slim: true, includeItemTypes: BROWSE, filters: "IsFavorite", sortBy: "Random", limit: 24, extra: NO_COUNT })),
+    items(client.items({ slim: true, includeItemTypes: BROWSE, sortBy: "Random", limit: 24, years: decadeYears(decade), extra: NO_COUNT })),
     items(client.genres(undefined, BROWSE)),
   ]);
 
@@ -255,7 +283,7 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
 
   const [similar, genreRows] = await Promise.all([
     Promise.all(seeds.map((seed) => items(client.similar(seed.id)).then((found) => found.filter((item) => !item.UserData?.Played)))),
-    Promise.all(genres.map((name) => items(client.items({ includeItemTypes: BROWSE, genres: name, sortBy: "Random", limit: 24 })))),
+    Promise.all(genres.map((name) => items(client.items({ slim: true, includeItemTypes: BROWSE, genres: name, sortBy: "Random", limit: 24, extra: NO_COUNT })))),
   ]);
 
   const genre = (index: number): HomeRow | undefined =>
@@ -264,7 +292,6 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
     seeds[index] ? { key: `similar-${seeds[index].id}`, title: `${title} ${seeds[index].name}`, items: similar[index] ?? [] } : undefined;
 
   const rows: (HomeRow | undefined)[] = [
-    { key: "top", title: serverName ? `Top 10 on ${serverName}` : "Top 10 on your server", subtitle: "Highest rated", kind: "rank", items: top },
     because(0, "Because you watched"),
     { key: "unseen", title: "Picked for you", subtitle: "Movies you haven't seen yet", items: unseen },
     genre(0),
@@ -285,8 +312,16 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
   return rows.filter((row): row is HomeRow => Boolean(row && row.items.length >= (row.min ?? 5)));
 }
 
+async function topRow(client: Jellyfin): Promise<HomeRow> {
+  const [serverName, top] = await Promise.all([
+    client.serverName().catch(() => ""),
+    items(client.items({ slim: true, includeItemTypes: BROWSE, sortBy: "CommunityRating,SortName", sortOrder: "Descending", limit: 10, extra: { MinCommunityRating: "1", ...NO_COUNT } })),
+  ]);
+  return { key: "top", title: serverName ? `Top 10 on ${serverName}` : "Top 10 on your server", subtitle: "Highest rated", kind: "rank", items: top };
+}
+
 function items(request: Promise<ItemList>) {
-  return request.then((list) => list.Items ?? []).catch(() => [] as BaseItem[]);
+  return request.then((list) => dedupe(list.Items ?? [])).catch(() => [] as BaseItem[]);
 }
 
 /**
@@ -294,7 +329,8 @@ function items(request: Promise<ItemList>) {
  * Movie+Series random query several times slower than the two apart, so ask
  * separately and mix in proportion to how many of each the library has.
  */
-async function heroPicks(client: Jellyfin, count = 10) {
+async function heroPicks(client: Jellyfin, types: Settings["heroTypes"], count = 10) {
+  const none = Promise.resolve({ Items: [], TotalRecordCount: 0 } as ItemList);
   const query = (includeItemTypes: string) =>
     client
       .items({
@@ -305,13 +341,36 @@ async function heroPicks(client: Jellyfin, count = 10) {
         extra: { ImageTypes: "Backdrop", MinCommunityRating: "6.5" },
       })
       .catch(() => ({ Items: [], TotalRecordCount: 0 }) as ItemList);
-  const [movies, series] = await Promise.all([query("Movie"), query("Series")]);
+  const [movies, series] = await Promise.all([
+    types === "shows" ? none : query("Movie"),
+    types === "movies" ? none : query("Series"),
+  ]);
   const movieItems = movies.Items ?? [];
   const seriesItems = series.Items ?? [];
   const total = (movies.TotalRecordCount ?? 0) + (series.TotalRecordCount ?? 0);
   const movieShare = total ? Math.round((count * (movies.TotalRecordCount ?? 0)) / total) : count;
   const takeMovies = Math.min(movieItems.length, Math.max(movieShare, count - seriesItems.length));
   return shuffle([...movieItems.slice(0, takeMovies), ...seriesItems.slice(0, count - takeMovies)]);
+}
+
+function heroFavorites(client: Jellyfin, types: Settings["heroTypes"]) {
+  const includeItemTypes = types === "movies" ? "Movie" : types === "shows" ? "Series" : "Movie,Series";
+  return items(client.items({ includeItemTypes, filters: "IsFavorite", sortBy: "Random", limit: HERO_COUNT, extra: { ImageTypes: "Backdrop" } }));
+}
+
+function heroType(item: BaseItem, types: Settings["heroTypes"]) {
+  if (types === "movies") return item.Type === "Movie";
+  if (types === "shows") return item.Type === "Series" || item.Type === "Episode" || item.Type === "Season";
+  return true;
+}
+
+function interleave<T>(first: T[], second: T[]) {
+  const mixed: T[] = [];
+  for (let index = 0; index < Math.max(first.length, second.length); index++) {
+    if (index < first.length) mixed.push(first[index]);
+    if (index < second.length) mixed.push(second[index]);
+  }
+  return mixed;
 }
 
 function decadeYears(decade: number) {
@@ -335,14 +394,30 @@ function Hero({ items, index, busy, onPlay, onOpen }: { items: BaseItem[]; index
   const code = episodeCode(item);
   const progress = item.UserData?.PlayedPercentage ?? 0;
   const label = progress > 1 && progress < 97 ? "Resume" : "Play";
+  // Only the outgoing and incoming backdrops are mounted; each full-size image
+  // costs several megabytes of decoded memory.
+  const shownRef = useRef(index);
+  const [outgoing, setOutgoing] = useState<{ from: number; to: number } | null>(null);
+  useEffect(() => {
+    const from = shownRef.current;
+    shownRef.current = index;
+    if (from !== index) setOutgoing({ from, to: index });
+    const next = items[(index + 1) % items.length];
+    const upcoming = next ? backdropUrl(session, next) : undefined;
+    if (upcoming) new Image().src = upcoming;
+    const timer = window.setTimeout(() => setOutgoing(null), 1300);
+    return () => window.clearTimeout(timer);
+  }, [index, items, session]);
+  const leaving = outgoing && outgoing.to === index ? items[outgoing.from] : undefined;
+  const previous = leaving && leaving.Id !== item.Id ? leaving : undefined;
+  const previousBackdrop = previous ? backdropUrl(session, previous) : undefined;
+  const backdrop = backdropUrl(session, item);
   return (
     <section className="hero">
-      {items.map((slide, slideIndex) => {
-        const backdrop = backdropUrl(session, slide);
-        return backdrop ? <img key={slide.Id} className={`hero-media${slideIndex === index ? " on" : ""}`} src={backdrop} alt="" decoding="async" /> : null;
-      })}
+      {previousBackdrop && previous ? <img key={`art-${previous.Id}`} className="hero-media prev" src={previousBackdrop} alt="" decoding="async" /> : null}
+      {backdrop ? <img key={`art-${item.Id}`} className={`hero-media on${previous ? " fade" : ""}`} src={backdrop} alt="" decoding="async" /> : null}
       <div className="hero-shade" />
-      <div className="hero-copy" key={item.Id}>
+      <div className="hero-copy" key={`copy-${item.Id}`}>
         {item.SeriesName ? <p className="eyebrow">{item.SeriesName}</p> : null}
         {logo && !brokenLogos[item.Id] ? (
           <img className="hero-logo" src={logo} alt={item.Name} onError={() => setBrokenLogos((current) => ({ ...current, [item.Id]: true }))} />

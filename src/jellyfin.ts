@@ -46,6 +46,24 @@ function authHeader(deviceId: string, token?: string) {
 }
 
 const LIST_FIELDS = "Overview,Genres,CommunityRating,OfficialRating,RunTimeTicks,ChildCount,PrimaryImageAspectRatio";
+/** Enough for poster and wide cards; overviews and genres are only shown in heroes and details. */
+const CARD_FIELDS = "ChildCount,PrimaryImageAspectRatio,Genres";
+
+export type PublicInfo = { Id?: string; ServerName?: string; LocalAddress?: string };
+
+/** Unauthenticated, so it is safe to ask an address before trusting it with a token. */
+export async function publicInfo(server: string, timeoutMs: number): Promise<PublicInfo | null> {
+  const abort = new AbortController();
+  const timer = window.setTimeout(() => abort.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${server}/System/Info/Public`, { signal: abort.signal, headers: { Accept: "application/json" } });
+    return response.ok ? ((await response.json()) as PublicInfo) : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 export class Jellyfin {
   constructor(
@@ -143,7 +161,7 @@ export class Jellyfin {
 
   resume() {
     return this.json<ItemList>(
-      `/Users/${this.auth.userId}/Items/Resume?Limit=24&MediaTypes=Video&Fields=${LIST_FIELDS}&EnableImageTypes=Primary,Backdrop,Thumb,Logo`,
+      `/Users/${this.auth.userId}/Items/Resume?Limit=24&MediaTypes=Video&Fields=${LIST_FIELDS}&EnableImageTypes=Primary,Backdrop,Thumb,Logo&ImageTypeLimit=1`,
     );
   }
 
@@ -153,9 +171,22 @@ export class Jellyfin {
       Limit: "24",
       Fields: LIST_FIELDS,
       EnableImageTypes: "Primary,Backdrop,Thumb,Logo",
+      ImageTypeLimit: "1",
     });
     if (seriesId) params.set("SeriesId", seriesId);
     return this.json<ItemList>(`/Shows/NextUp?${params}`);
+  }
+
+  /** Episodes airing from today on, including ones not on the server yet. */
+  upcoming(limit = 300) {
+    const params = new URLSearchParams({
+      UserId: this.auth.userId,
+      Limit: String(limit),
+      Fields: "PremiereDate",
+      EnableImageTypes: "Primary,Backdrop,Thumb",
+      ImageTypeLimit: "1",
+    });
+    return this.json<ItemList>(`/Shows/Upcoming?${params}`);
   }
 
   latest(parentId?: string, includeItemTypes?: string) {
@@ -163,6 +194,7 @@ export class Jellyfin {
       Limit: "18",
       Fields: LIST_FIELDS,
       EnableImageTypes: "Primary,Backdrop,Thumb,Logo",
+      ImageTypeLimit: "1",
     });
     if (parentId) params.set("ParentId", parentId);
     if (includeItemTypes) params.set("IncludeItemTypes", includeItemTypes);
@@ -183,14 +215,17 @@ export class Jellyfin {
     years?: string;
     /** Extra Jellyfin query parameters such as MinCommunityRating. */
     extra?: Record<string, string>;
+    /** Only what cards draw, for rows and grids. */
+    slim?: boolean;
   }) {
     const params = new URLSearchParams({
       UserId: this.auth.userId,
       Recursive: String(options.recursive ?? true),
-      Fields: LIST_FIELDS,
+      Fields: options.slim ? CARD_FIELDS : LIST_FIELDS,
       Limit: String(options.limit ?? 60),
       StartIndex: String(options.startIndex ?? 0),
-      EnableImageTypes: "Primary,Backdrop,Thumb,Logo",
+      EnableImageTypes: options.slim ? "Primary,Backdrop,Thumb" : "Primary,Backdrop,Thumb,Logo",
+      ImageTypeLimit: "1",
     });
     if (options.parentId) params.set("ParentId", options.parentId);
     if (options.includeItemTypes) params.set("IncludeItemTypes", options.includeItemTypes);
@@ -244,8 +279,9 @@ export class Jellyfin {
     const params = new URLSearchParams({
       UserId: this.auth.userId,
       Limit: String(limit),
-      Fields: LIST_FIELDS,
+      Fields: CARD_FIELDS,
       EnableImageTypes: "Primary,Backdrop,Thumb",
+      ImageTypeLimit: "1",
     });
     return this.json<ItemList>(`/Items/${id}/Similar?${params}`);
   }

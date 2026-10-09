@@ -72,7 +72,7 @@ export function RemoteProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!target?.DeviceId) return;
-    const timer = window.setInterval(() => void pollRef.current(), POLL_MS);
+    const timer = window.setInterval(() => !document.hidden && void pollRef.current(), POLL_MS);
     return () => window.clearInterval(timer);
   }, [target?.DeviceId]);
 
@@ -134,9 +134,9 @@ export function RemoteProvider({ children }: { children: ReactNode }) {
           case "Seek":
             return current.seek(ticksToSeconds(message.SeekPositionTicks ?? 0));
           case "Rewind":
-            return current.seek(Math.max(0, current.position - 10));
+            return playerRequest(["seek", -10, "relative"]);
           case "FastForward":
-            return current.seek(current.position + 30);
+            return playerRequest(["seek", 30, "relative"]);
         }
         return;
       }

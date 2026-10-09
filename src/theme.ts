@@ -23,3 +23,8 @@ export function applyTheme(theme: Theme) {
   current = theme;
   paint();
 }
+
+/** Drops blur and other GPU-heavy effects (see `[data-lite]` in styles.css). */
+export function applyLowPower(on: boolean) {
+  document.documentElement.toggleAttribute("data-lite", on);
+}

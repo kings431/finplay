@@ -132,9 +132,19 @@ function repeat(key: string, pressed: boolean, action: () => void, now: number, 
   }
 }
 
-function pollPads(now: number) {
+/** 20 checks a second is plenty for menu navigation and lets the CPU idle,
+ * unlike polling on every display frame. */
+const PAD_POLL_MS = 50;
+const PAD_HIDDEN_POLL_MS = 500;
+
+function schedulePads() {
+  frame = window.setTimeout(pollPads, document.hidden ? PAD_HIDDEN_POLL_MS : PAD_POLL_MS);
+}
+
+function pollPads() {
   frame = 0;
   if (!enabled) return;
+  const now = performance.now();
   const pads = navigator.getGamepads?.() ?? [];
   for (const pad of pads) {
     if (!pad) continue;
@@ -148,11 +158,11 @@ function pollPads(now: number) {
     repeat(`${id}a`, button(0), () => (document.activeElement as HTMLElement | null)?.click(), now, false);
     repeat(`${id}b`, button(1), back, now, false);
   }
-  if (pads.some(Boolean)) frame = requestAnimationFrame(pollPads);
+  if (pads.some(Boolean)) schedulePads();
 }
 
 function onPad() {
-  if (enabled && !frame) frame = requestAnimationFrame(pollPads);
+  if (enabled && !frame) schedulePads();
 }
 
 export function applyCouch(next: boolean) {
@@ -160,7 +170,7 @@ export function applyCouch(next: boolean) {
   document.documentElement.toggleAttribute("data-couch", next);
   window.removeEventListener("keydown", onKey);
   window.removeEventListener("gamepadconnected", onPad);
-  if (frame) cancelAnimationFrame(frame);
+  if (frame) window.clearTimeout(frame);
   frame = 0;
   if (!next) return;
   window.addEventListener("keydown", onKey);

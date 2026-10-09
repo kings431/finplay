@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { clearCache } from "./cache";
-import { ApiError, Jellyfin, normalizeServer } from "./jellyfin";
+import { ApiError, Jellyfin, normalizeServer, publicInfo } from "./jellyfin";
 import type { BaseItem } from "./types";
 
 const AUTH_KEY = "finplay.auth";
@@ -16,7 +16,21 @@ export type StoredAuth = {
   isAdmin?: boolean;
   /** Jellyfin signs out other users on the same device id, so each account keeps its own. */
   deviceId?: string;
+  /** Address to prefer on the home network; the same token works on both. */
+  localServer?: string;
+  /** A home address only gets the token once it answers with this id. */
+  serverId?: string;
 };
+
+const LOCAL_TIMEOUT = 1500;
+const RECHECK_MS = 30_000;
+
+/** The home address when it is reachable and really is this server, otherwise the saved one. */
+async function pickAddress(account: StoredAuth) {
+  if (!account.localServer || !account.serverId) return account.server;
+  const info = await publicInfo(account.localServer, LOCAL_TIMEOUT);
+  return info?.Id === account.serverId ? account.localServer : account.server;
+}
 
 type SignedIn = Awaited<ReturnType<typeof Jellyfin.login>>;
 
@@ -26,7 +40,13 @@ type Status = "loading" | "anon" | "ready" | "offline";
 type SessionContextValue = {
   status: Status;
   reconnect: () => void;
+  /** The address in use right now: the home address when on the home network. */
   server: string;
+  /** The address the account was saved with, which identifies it. */
+  accountServer: string;
+  localServer?: string;
+  /** Saves or clears the home address; resolves false when it can't be reached right now. */
+  setLocalServer: (address: string | null) => Promise<boolean>;
   token: string;
   userId: string;
   username: string;
@@ -85,6 +105,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [attempt, setAttempt] = useState(0);
   const reconnect = useCallback(() => setAttempt((value) => value + 1), []);
   const [auth, setAuth] = useState<StoredAuth | null>(null);
+  const [address, setAddress] = useState("");
   const [accounts, setAccounts] = useState<StoredAuth[]>(readAccounts);
   const [views, setViews] = useState<BaseItem[]>([]);
   const [seerr, setSeerr] = useState(false);
@@ -145,8 +166,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const deviceId = auth?.deviceId ?? base;
   const client = useMemo(() => {
     if (!auth) return null;
-    return new Jellyfin({ server: auth.server, token: auth.token, userId: auth.userId, deviceId: auth.deviceId ?? base }, expired);
-  }, [auth, base, expired]);
+    return new Jellyfin({ server: address || auth.server, token: auth.token, userId: auth.userId, deviceId: auth.deviceId ?? base }, expired);
+  }, [auth, address, base, expired]);
 
   useEffect(() => {
     let cancel = false;
@@ -155,17 +176,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setStatus("anon");
       return;
     }
-    const probe = new Jellyfin({ server: stored.server, token: stored.token, userId: stored.userId, deviceId: stored.deviceId ?? base }, () => {});
-    probe
-      .me()
-      .then((me) => {
+    void (async () => {
+      const preferred = await pickAddress(stored);
+      if (cancel) return;
+      const signIn = (server: string) =>
+        new Jellyfin({ server, token: stored.token, userId: stored.userId, deviceId: stored.deviceId ?? base }, () => {}).me().then((me) => ({ me, server }));
+      try {
+        const { me, server } = await signIn(preferred).catch((err: unknown) => {
+          if (preferred === stored.server || (err instanceof ApiError && err.status === 401)) throw err;
+          return signIn(stored.server);
+        });
         if (cancel) return;
-        const next = { ...stored, username: me.Name, imageTag: me.PrimaryImageTag, isAdmin: me.Policy?.IsAdministrator === true };
+        const serverId = stored.serverId ?? (await publicInfo(server, 4000))?.Id;
+        const next = { ...stored, username: me.Name, imageTag: me.PrimaryImageTag, isAdmin: me.Policy?.IsAdministrator === true, serverId };
+        if (cancel) return;
         remember(next);
+        setAddress(server);
         setAuth(next);
         setStatus("ready");
-      })
-      .catch((err: unknown) => {
+      } catch (err) {
         if (cancel) return;
         if (err instanceof ApiError && err.status === 401) {
           localStorage.removeItem(AUTH_KEY);
@@ -173,9 +202,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           setStatus("anon");
           return;
         }
+        setAddress(stored.server);
         setAuth(stored);
         setStatus("offline");
-      });
+      }
+    })();
     return () => {
       cancel = true;
     };
@@ -206,6 +237,52 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
   }, [client, status]);
 
+  // Moving between home and away changes which address answers.
+  useEffect(() => {
+    if (!auth?.localServer || status !== "ready") return;
+    let cancel = false;
+    let last = Date.now();
+    const check = () => {
+      if (document.hidden || Date.now() - last < 5_000) return;
+      last = Date.now();
+      void pickAddress(auth).then((next) => {
+        if (!cancel) setAddress(next);
+      });
+    };
+    window.addEventListener("online", check);
+    window.addEventListener("focus", check);
+    const timer = window.setInterval(check, RECHECK_MS);
+    return () => {
+      cancel = true;
+      window.removeEventListener("online", check);
+      window.removeEventListener("focus", check);
+      window.clearInterval(timer);
+    };
+  }, [auth, status]);
+
+  const setLocalServer = useCallback(
+    async (input: string | null) => {
+      if (!auth) return false;
+      if (!input?.trim()) {
+        const next = { ...auth, localServer: undefined };
+        remember(next);
+        setAuth(next);
+        setAddress(auth.server);
+        return true;
+      }
+      const local = normalizeServer(input);
+      const serverId = auth.serverId ?? (await publicInfo(address || auth.server, 4000))?.Id;
+      const info = await publicInfo(local, 3000);
+      if (info && serverId && info.Id !== serverId) throw new Error("That address answers as a different Jellyfin server.");
+      const next = { ...auth, localServer: local, serverId: serverId ?? info?.Id };
+      remember(next);
+      setAuth(next);
+      if (info) setAddress(local);
+      return Boolean(info);
+    },
+    [auth, address, remember],
+  );
+
   const deviceFor = useCallback(
     (server: string, username?: string) => {
       const known = accounts.find((account) => account.server === server && username && account.username.toLowerCase() === username.toLowerCase());
@@ -229,6 +306,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       };
       reset();
       remember(next);
+      setAddress(server);
       setAuth(next);
       setStatus("ready");
     },
@@ -272,7 +350,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     () => ({
       status,
       reconnect,
-      server: auth?.server ?? "",
+      server: auth ? address || auth.server : "",
+      accountServer: auth?.server ?? "",
+      localServer: auth?.localServer,
+      setLocalServer,
       token: auth?.token ?? "",
       userId: auth?.userId ?? "",
       username: auth?.username ?? "",
@@ -292,7 +373,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       forget,
       logout,
     }),
-    [status, reconnect, auth, deviceId, views, seerr, client, accounts, login, adopt, deviceFor, switchTo, addAccount, cancelAdd, forget, logout],
+    [status, reconnect, auth, address, setLocalServer, deviceId, views, seerr, client, accounts, login, adopt, deviceFor, switchTo, addAccount, cancelAdd, forget, logout],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

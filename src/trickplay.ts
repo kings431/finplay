@@ -2,7 +2,7 @@ import type { Auth } from "./jellyfin";
 import { sendThumb } from "./player";
 import type { BaseItem, TrickplayInfo } from "./types";
 
-const MAX_TILES = 6;
+const MAX_TILES = 2;
 
 type Source = { itemId: string; sourceId: string; info: TrickplayInfo; offsetSeconds: number };
 

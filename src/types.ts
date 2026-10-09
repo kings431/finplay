@@ -65,6 +65,8 @@ export type BaseItem = {
   Status?: string;
   PremiereDate?: string;
   EndDate?: string;
+  /** "Virtual" for episodes Jellyfin knows about but has no file for yet. */
+  LocationType?: string;
   ProductionLocations?: string[];
   LocalTrailerCount?: number;
   RemoteTrailers?: { Url?: string; Name?: string }[];
@@ -267,9 +269,21 @@ export type Settings = {
   playbackSpeed: number;
   streamystatsUrl: string;
   couchMode: boolean;
+  /** What the Home hero shows, in this order. */
+  heroSources: HeroSource[];
+  heroTypes: "all" | "movies" | "shows";
+  heroAutoAdvance: boolean;
+  /** No blur effects and cheaper video scaling, for older or low-power machines. */
+  lowPower: boolean;
 };
 
+export type HeroSource = "resume" | "nextUp" | "picks" | "latest" | "favorites";
+
 export const DEFAULT_SETTINGS: Settings = {
+  heroSources: ["resume", "nextUp", "picks", "latest"],
+  heroTypes: "all",
+  heroAutoAdvance: true,
+  lowPower: typeof navigator !== "undefined" && (navigator.hardwareConcurrency || 8) <= 4,
   theme: "dark",
   fullscreen: false,
   audioLanguage: "",

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useDownloads } from "../downloads";
 import { IconChart, IconCompass, IconDownload, IconFilm, IconGrid, IconHome, IconLive, IconSearch, IconSettings, IconTv, IconUsers, Mark } from "../icons";
@@ -13,7 +13,7 @@ import { CastButton, RemoteBar } from "./Cast";
 const OFFLINE_PATHS = ["/downloads", "/settings", "/playing/", "/item/"];
 
 function ProfileMenu({ avatar }: { avatar?: string }) {
-  const { username, server, userId, accounts, switchTo, addAccount, logout } = useSession();
+  const { username, accountServer: server, userId, accounts, switchTo, addAccount, logout } = useSession();
   const { active, stop } = usePlayback();
   const navigate = useNavigate();
   const anchor = useRef<HTMLButtonElement>(null);
@@ -78,8 +78,8 @@ function ProfileMenu({ avatar }: { avatar?: string }) {
 }
 
 export function Shell() {
-  const { views, imageTag, server, token, userId, deviceId, seerr, status, reconnect, isAdmin } = useSession();
-  const { active, error, clearError } = usePlayback();
+  const { views, imageTag, server, token, userId, deviceId, status, reconnect, isAdmin } = useSession();
+  const { active, error, clearError, mini, setMini } = usePlayback();
   const { entries } = useDownloads();
   const location = useLocation();
   const navigate = useNavigate();
@@ -143,12 +143,10 @@ export function Shell() {
                 <IconGrid />
                 <span>Library</span>
               </NavLink>
-              {seerr ? (
-                <NavLink to="/discover" className={link}>
-                  <IconCompass />
-                  <span>Discover</span>
-                </NavLink>
-              ) : null}
+              <NavLink to="/discover" className={link}>
+                <IconCompass />
+                <span>Discover</span>
+              </NavLink>
               <NavLink to="/search" className={link}>
                 <IconSearch />
                 <span>Search</span>
@@ -177,7 +175,7 @@ export function Shell() {
           ) : null}
           {offline ? null : <CastButton />}
           {active ? (
-            <button className="now-pill" onClick={() => navigate(`/playing/${active.item.Id}`)}>
+            <button className="now-pill" onClick={() => (mini ? void setMini(false) : navigate(`/playing/${active.item.Id}`))}>
               Playing
             </button>
           ) : null}
@@ -210,7 +208,9 @@ export function Shell() {
           </div>
         ) : null}
         <UpdateBanner />
-        <Outlet />
+        <Suspense fallback={null}>
+          <Outlet />
+        </Suspense>
       </main>
       {together.notice ? <div className="toast">{together.notice}</div> : null}
       {offline ? null : <RemoteBar />}

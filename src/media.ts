@@ -57,6 +57,13 @@ export function tile(name: string) {
   return `hsl(${hue(name)} var(--tile-sat) var(--tile-light))`;
 }
 
+/** Pixels to request for something shown `css` points large: 1x screens need
+ * far less than Retina. Rounded so URLs (and Jellyfin's image cache) stay few. */
+function devicePixels(css: number, cap: number) {
+  const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  return Math.min(cap, Math.ceil((css * ratio) / 40) * 40);
+}
+
 export function imageUrl(
   auth: Auth,
   itemId: string,
@@ -74,18 +81,18 @@ export function imageUrl(
     return `${auth.server}/Items/${itemId}/Images/${path}?${params}`;
   }
   if (kind === "Backdrop") {
-    params.set("maxWidth", "1920");
+    params.set("maxWidth", String(devicePixels(window.screen?.width || 1920, 1920)));
     params.set("quality", "70");
     return `${auth.server}/Items/${itemId}/Images/Backdrop/${index}?${params}`;
   }
   if (kind === "Logo") {
-    params.set("maxHeight", "280");
+    params.set("maxHeight", String(devicePixels(160, 280)));
     params.set("quality", "90");
   } else if (kind === "Thumb") {
-    params.set("maxWidth", "800");
+    params.set("maxWidth", String(devicePixels(400, 800)));
     params.set("quality", "75");
   } else {
-    params.set("maxHeight", "520");
+    params.set("maxHeight", String(devicePixels(400, 520)));
     params.set("quality", "80");
   }
   return `${auth.server}/Items/${itemId}/Images/${kind}?${params}`;

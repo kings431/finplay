@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { secondsToTicks, ticksToSeconds } from "./media";
-import { usePlayback, type PlayOptions } from "./playback";
+import { usePlayback, usePlaybackClock, type PlayOptions } from "./playback";
 import { useSession } from "./session";
 import type { BaseItem, SyncGroup } from "./types";
 
@@ -35,6 +35,9 @@ const SEEK_TOLERANCE = 4;
 export function SyncPlayProvider({ children }: { children: ReactNode }) {
   const { client, status, username } = useSession();
   const playback = usePlayback();
+  const clock = usePlaybackClock();
+  const clockRef = useRef(clock);
+  clockRef.current = clock;
   const playbackRef = useRef(playback);
   playbackRef.current = playback;
   const [group, setGroup] = useState<SyncGroup | null>(null);
@@ -95,7 +98,7 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
     const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       const current = playbackRef.current;
-      if (current.active?.item.Id === itemId && current.duration > 0) return true;
+      if (current.active?.item.Id === itemId && clockRef.current.duration > 0) return true;
       await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
     return false;
@@ -283,19 +286,19 @@ export function SyncPlayProvider({ children }: { children: ReactNode }) {
     const expected = expectRef.current;
     const now = Date.now();
     if (now < expected.quietUntil) return;
-    if (playback.paused !== expected.paused) {
-      expect(playback.paused, playback.position);
-      void client.sync(playback.paused ? "Pause" : "Unpause");
+    if (clock.paused !== expected.paused) {
+      expect(clock.paused, clock.position);
+      void client.sync(clock.paused ? "Pause" : "Unpause");
       return;
     }
     const projected = expected.paused ? expected.position : expected.position + (now - expected.at) / 1000;
-    if (Math.abs(playback.position - projected) > SEEK_TOLERANCE) {
-      expect(true, playback.position, 3000);
-      void client.sync("Seek", { PositionTicks: secondsToTicks(playback.position) });
+    if (Math.abs(clock.position - projected) > SEEK_TOLERANCE) {
+      expect(true, clock.position, 3000);
+      void client.sync("Seek", { PositionTicks: secondsToTicks(clock.position) });
       return;
     }
-    expectRef.current = { ...expected, position: playback.position, at: now };
-  }, [group, client, playback.active, playback.paused, playback.position]);
+    expectRef.current = { ...expected, position: clock.position, at: now };
+  }, [group, client, playback.active, clock.paused, clock.position]);
 
   const enter = useCallback(
     async (action: "New" | "Join", body: Record<string, unknown>) => {

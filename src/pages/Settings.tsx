@@ -1,13 +1,21 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError } from "../jellyfin";
+import { ApiError, publicInfo } from "../jellyfin";
 import { loadSettings, saveSettings } from "../settings";
 import { useSession } from "../session";
 import { normalizeStatsUrl, openStats } from "../stats";
-import { applyTheme } from "../theme";
+import { applyLowPower, applyTheme } from "../theme";
 import { applyCouch } from "../couch";
 import { appVersion, findUpdate, installUpdate, type Update } from "../updates";
-import type { Settings, Theme } from "../types";
+import type { HeroSource, Settings, Theme } from "../types";
+
+const HERO_SOURCES: { id: HeroSource; label: string }[] = [
+  { id: "resume", label: "Continue watching" },
+  { id: "nextUp", label: "Next up" },
+  { id: "picks", label: "Recommended" },
+  { id: "latest", label: "Recently added" },
+  { id: "favorites", label: "Favorites" },
+];
 
 const THEMES: { id: Theme; label: string; hint: string }[] = [
   { id: "system", label: "System", hint: "Follows your desktop's light or dark mode" },
@@ -125,6 +133,95 @@ function QuickConnect() {
   );
 }
 
+function Connection() {
+  const { server, accountServer, localServer, setLocalServer } = useSession();
+  const [draft, setDraft] = useState(localServer ?? "");
+  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const [suggested, setSuggested] = useState("");
+  const home = Boolean(localServer) && server === localServer;
+
+  useEffect(() => setDraft(localServer ?? ""), [localServer]);
+  useEffect(() => {
+    if (localServer) return;
+    let cancel = false;
+    void publicInfo(accountServer, 4000).then((info) => {
+      const address = info?.LocalAddress?.replace(/\/+$/, "");
+      if (!cancel && address && address !== accountServer) setSuggested(address);
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [accountServer, localServer]);
+
+  async function save(event?: FormEvent, value = draft) {
+    event?.preventDefault();
+    setBusy(true);
+    setState(null);
+    try {
+      const reached = await setLocalServer(value.trim() || null);
+      if (!value.trim()) setState({ tone: "ok", text: "Removed. Finplay will always use the main address." });
+      else if (reached) setState({ tone: "ok", text: "Saved. You're on your home network, so Finplay is using it now." });
+      else setState({ tone: "ok", text: "Saved, but it can't be reached from here. Finplay will switch to it whenever you're home." });
+    } catch (err) {
+      setState({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2>Connection</h2>
+      <div className="setting-row">
+        <div>
+          <strong>Main address</strong>
+          <p>Used whenever you're away from home.</p>
+        </div>
+        <span className="setting-value">{accountServer.replace(/^https?:\/\//, "")}</span>
+      </div>
+      <form className="setting-row wide-control" onSubmit={(event) => void save(event)}>
+        <div>
+          <strong>Home network address</strong>
+          <p>
+            Optional. When this answers, Finplay uses it instead, for full-speed streaming at home with no trip through the internet. It's checked to
+            be the same server before your sign-in is ever sent to it.
+          </p>
+          {localServer ? (
+            <p className="connection-now">
+              <i className={home ? "on" : ""} />
+              {home ? "Connected through your home network" : "Connected through the main address"}
+            </p>
+          ) : null}
+          {suggested && !localServer ? (
+            <p>
+              Your server reports{" "}
+              <button type="button" className="link-btn" onClick={() => setDraft(suggested)}>
+                {suggested.replace(/^https?:\/\//, "")}
+              </button>
+              . That may be an internal address; use the one you'd type in a browser at home.
+            </p>
+          ) : null}
+          {state ? <p className={state.tone === "ok" ? "ok-text" : "error-text"}>{state.text}</p> : null}
+        </div>
+        <div className="inline-form">
+          <input className="address-input" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="http://192.168.1.10:8096" spellCheck={false} />
+          {localServer && draft.trim() === localServer ? null : (
+            <button className="btn-ghost" type="submit" disabled={busy || !draft.trim()}>
+              {busy ? "Checking…" : "Save"}
+            </button>
+          )}
+          {localServer && draft.trim() === localServer ? (
+            <button type="button" className="btn-ghost" disabled={busy} onClick={() => void save(undefined, "")}>
+              Remove
+            </button>
+          ) : null}
+        </div>
+      </form>
+    </section>
+  );
+}
+
 export function Settings() {
   const { username, server, logout, isAdmin } = useSession();
   const navigate = useNavigate();
@@ -188,6 +285,65 @@ export function Settings() {
             }}
             aria-pressed={settings.couchMode}
           />
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Low-power mode</strong>
+            <p>Turns off glass blur effects and uses lighter video scaling. Smoother on older computers and easier on the battery.</p>
+          </div>
+          <button
+            className={`switch${settings.lowPower ? " on" : ""}`}
+            onClick={() => {
+              update({ lowPower: !settings.lowPower });
+              applyLowPower(!settings.lowPower);
+            }}
+            aria-pressed={settings.lowPower}
+          />
+        </div>
+      </section>
+      <section>
+        <h2>Home</h2>
+        <div className="setting-row">
+          <div>
+            <strong>Highlights</strong>
+            <p>What the big banner at the top of Home shows, in the order picked. Changes apply the next time Home opens.</p>
+          </div>
+          <div className="chips" role="group" aria-label="Highlights">
+            {HERO_SOURCES.map((source) => {
+              const on = settings.heroSources.includes(source.id);
+              return (
+                <button
+                  key={source.id}
+                  className={on ? "on" : ""}
+                  aria-pressed={on}
+                  onClick={() => {
+                    const next = on ? settings.heroSources.filter((id) => id !== source.id) : [...settings.heroSources, source.id];
+                    if (next.length > 0) update({ heroSources: next });
+                  }}
+                >
+                  {source.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Highlight titles</strong>
+            <p>Limit the banner to movies or shows.</p>
+          </div>
+          <select value={settings.heroTypes} onChange={(event) => update({ heroTypes: event.target.value as Settings["heroTypes"] })}>
+            <option value="all">Movies and shows</option>
+            <option value="movies">Movies only</option>
+            <option value="shows">Shows only</option>
+          </select>
+        </div>
+        <div className="setting-row">
+          <div>
+            <strong>Rotate highlights</strong>
+            <p>Moves to the next highlight every few seconds.</p>
+          </div>
+          <button className={`switch${settings.heroAutoAdvance ? " on" : ""}`} onClick={() => update({ heroAutoAdvance: !settings.heroAutoAdvance })} aria-pressed={settings.heroAutoAdvance} />
         </div>
       </section>
       <section>
@@ -329,6 +485,7 @@ export function Settings() {
           </button>
         </section>
       ) : null}
+      <Connection />
       <QuickConnect />
       <About />
       <section>

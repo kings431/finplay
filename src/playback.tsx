@@ -4,7 +4,7 @@ import { Jellyfin } from "./jellyfin";
 import { useSession } from "./session";
 import { loadSettings } from "./settings";
 import { invalidate, markStale } from "./cache";
-import { listenNext, listenPlayer, listenThumbRequests, playerFocus, playerPlay, playerRequest, playerStop, inTauri } from "./player";
+import { listenMiniExit, listenMiniToggle, listenNext, listenPlayer, listenThumbRequests, playerFocus, playerMini, playerPlay, playerRequest, playerStop, inTauri } from "./player";
 import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
 import { nextDownloaded, useDownloads, type DownloadEntry } from "./downloads";
@@ -46,10 +46,6 @@ type PlaybackContextValue = {
   active: ActivePlayback | null;
   busy: boolean;
   error: string;
-  position: number;
-  duration: number;
-  paused: boolean;
-  finished: boolean;
   clearError: () => void;
   play: (item: BaseItem, options?: PlayOptions) => Promise<void>;
   stop: () => Promise<void>;
@@ -58,6 +54,9 @@ type PlaybackContextValue = {
   setPaused: (paused: boolean) => Promise<void>;
   /** While set, `play` hands titles to this instead of the local player. */
   setRemote: (send: RemoteSend | null) => void;
+  /** The picture sits in a corner while the rest of the app stays usable. */
+  mini: boolean;
+  setMini: (on: boolean) => Promise<boolean>;
 };
 
 export type RemoteSend = (item: BaseItem, startTicks: number, mediaSourceId?: string) => Promise<void>;
@@ -78,7 +77,12 @@ export type PlayOptions = {
 
 type ResumeAsk = { item: BaseItem; seconds: number; resolve: (choice: "resume" | "start" | null) => void };
 
+/** Changes several times a second while playing, so it has its own context:
+ * only views that show the clock re-render on every tick. */
+type PlaybackClock = { position: number; duration: number; paused: boolean; finished: boolean };
+
 const PlaybackContext = createContext<PlaybackContextValue | null>(null);
+const PlaybackClockContext = createContext<PlaybackClock>({ position: 0, duration: 0, paused: false, finished: false });
 
 function segmentsFor(segments: MediaSegment[], offsetSeconds: number) {
   return segments
@@ -113,6 +117,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(0);
   const [paused, setPaused] = useState(false);
   const [finished, setFinished] = useState(false);
+  const [mini, setMiniState] = useState(false);
+  const miniRef = useRef(false);
 
   const activeRef = useRef<ActivePlayback | null>(null);
   const positionRef = useRef(0);
@@ -193,7 +199,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       markStale("home:");
       invalidate(`item:${current.item.Id}`);
       if (current.item.SeriesId) invalidate(`item:${current.item.SeriesId}`);
-      if (navigateAway) {
+      if (navigateAway && miniRef.current) {
+        // Leave the viewer on whatever they were browsing.
+        miniRef.current = false;
+        setMiniState(false);
+        void playerMini(false);
+      } else if (navigateAway) {
         navigateRef.current(statusRef.current === "ready" ? current.returnTo ?? `/item/${current.item.Id}` : "/downloads", { replace: true });
       }
     },
@@ -330,6 +341,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             segments: media.segments,
             nextTitle: media.next ? [episodeCode(media.next), media.next.Name].filter(Boolean).join(" · ") : "",
             autoSkip: settings.autoSkipIntro,
+            lowPower: settings.lowPower,
             artist: playback.item.SeriesName ?? (playback.item.ProductionYear ? String(playback.item.ProductionYear) : ""),
             artUrl: media.artUrl,
             trailer: playback.trailer,
@@ -346,7 +358,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         pausedRef.current = false;
         sentRef.current = { ...volumeRef.current, paused: false, position: startSeconds, at: Date.now() };
         void report(playback, "start", startSeconds, false);
-        navigate(`/playing/${playback.item.Id}`);
+        if (!miniRef.current) navigate(`/playing/${playback.item.Id}`);
       };
 
       const playDownload = async (entry: DownloadEntry) => {
@@ -537,7 +549,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     }
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (resumeAsk) return;
+      if (resumeAsk || miniRef.current) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       const typing =
@@ -580,6 +592,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       } else if (event.key === "c" || event.key === "C") {
         handled = true;
         void playerRequest(["keypress", "c"]);
+      } else if (event.key === "p" || event.key === "P") {
+        handled = true;
+        void playerRequest(["script-message", "finplay-mini"]);
       } else if (event.key === "[") {
         handled = true;
         void playerRequest(["keypress", "["]);
@@ -602,15 +617,53 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     };
   }, [active, resumeAsk]);
 
+  const setMini = useCallback(async (on: boolean) => {
+    const current = activeRef.current;
+    if (on === miniRef.current || (on && !current)) return false;
+    if (!(await playerMini(on).catch(() => false))) return false;
+    miniRef.current = on;
+    setMiniState(on);
+    if (!current) return true;
+    if (on) {
+      if (window.history.length > 1) navigateRef.current(-1);
+      else navigateRef.current(current.returnTo ?? `/item/${current.item.Id}`);
+    } else {
+      navigateRef.current(`/playing/${current.item.Id}`);
+    }
+    return true;
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri()) return;
+    let cancel = false;
+    let unlisten: (() => void) | undefined;
+    listenMiniExit(() => {
+      if (!miniRef.current) return;
+      miniRef.current = false;
+      setMiniState(false);
+      const current = activeRef.current;
+      if (current) navigateRef.current(`/playing/${current.item.Id}`);
+    }).then((stopListening) => {
+      if (cancel) stopListening();
+      else unlisten = stopListening;
+    });
+    let unlistenToggle: (() => void) | undefined;
+    listenMiniToggle(() => void setMini(!miniRef.current)).then((stopListening) => {
+      if (cancel) stopListening();
+      else unlistenToggle = stopListening;
+    });
+    return () => {
+      cancel = true;
+      unlisten?.();
+      unlistenToggle?.();
+    };
+  }, [setMini]);
+
   const value = useMemo<PlaybackContextValue>(
     () => ({
       active,
       busy,
       error,
-      position,
-      duration,
-      paused,
-      finished,
       clearError: () => setError(""),
       play,
       stop,
@@ -620,14 +673,19 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       setRemote: (send) => {
         remoteRef.current = send;
       },
+      mini,
+      setMini,
     }),
-    [active, busy, error, position, duration, paused, finished, play, stop, togglePause, seek, pauseTo],
+    [active, busy, error, play, stop, togglePause, seek, pauseTo, mini, setMini],
   );
+  const clock = useMemo<PlaybackClock>(() => ({ position, duration, paused, finished }), [position, duration, paused, finished]);
 
   return (
     <PlaybackContext.Provider value={value}>
-      {children}
-      {resumeAsk ? <ResumePrompt ask={resumeAsk} /> : null}
+      <PlaybackClockContext.Provider value={clock}>
+        {children}
+        {resumeAsk ? <ResumePrompt ask={resumeAsk} /> : null}
+      </PlaybackClockContext.Provider>
     </PlaybackContext.Provider>
   );
 }
@@ -700,6 +758,10 @@ export function usePlayback() {
   const value = useContext(PlaybackContext);
   if (!value) throw new Error("Playback missing");
   return value;
+}
+
+export function usePlaybackClock() {
+  return useContext(PlaybackClockContext);
 }
 
 export function methodHint(method: PlayMethod) {

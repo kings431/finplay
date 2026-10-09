@@ -50,7 +50,7 @@ export function Library() {
     years: decade ? decadeYears(decade) : undefined,
   };
   const key = `library:${id}:${include}:${sort.id}:${filters}:${genre}:${decade}:${sort.id === "random" ? shuffle : ""}`;
-  const { data, error, loading } = useCached(key, () => client.items({ ...query, limit: 80 }));
+  const { data, error, loading } = useCached(key, () => client.items({ ...query, limit: 80, slim: true }));
   useEffect(() => {
     setMore([]);
     setMoreError(false);
@@ -66,7 +66,7 @@ export function Library() {
     setLoadingMore(true);
     const requestKey = key;
     try {
-      const list = await client.items({ ...query, startIndex: items.length, limit: 80 });
+      const list = await client.items({ ...query, startIndex: items.length, limit: 80, slim: true });
       if (requestKey !== keyRef.current) return;
       const seen = new Set(items.map((item) => item.Id));
       const fresh = (list.Items ?? []).filter((item) => !seen.has(item.Id));

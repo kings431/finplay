@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useInfiniteScroll } from "../useInfiniteScroll";
 import { Row } from "../components/Cards";
 import { markRequested, SeerrCard, useSeerrPicker } from "../components/RequestSheet";
 import { useCached } from "../cache";
 import { useClient, useSession } from "../session";
 import type { SeerrResult } from "../types";
+import { Calendar } from "./Calendar";
 
 export const DISCOVER_LISTS = [
   { slug: "trending", path: "trending", title: "Trending" },
@@ -43,41 +44,54 @@ export function Discover() {
     ),
   );
 
-  if (!session.seerr) {
-    return (
-      <div className="page">
-        <header className="page-head">
-          <h1>Discover</h1>
-        </header>
-        <p className="empty">Discover needs Jellyseerr connected through the Jellyfin Enhanced plugin on your server.</p>
-      </div>
-    );
-  }
+  const [params, setParams] = useSearchParams();
+  const view = params.get("view") === "calendar" || !session.seerr ? "calendar" : "browse";
+  const show = (next: "browse" | "calendar") => setParams(next === "calendar" ? { view: "calendar" } : {}, { replace: true });
 
   return (
     <div className="page discover-page">
       <header className="page-head">
         <div>
           <h1>Discover</h1>
-          <p>Find something new and request it.</p>
+          <p>{view === "calendar" ? "New episodes and movies on the way." : "Find something new and request it."}</p>
         </div>
-        <Link className="btn-ghost" to="/requests">
-          My requests
-        </Link>
+        <div className="discover-head-actions">
+          <div className="chips segmented">
+            <button className={view === "browse" ? "on" : ""} onClick={() => show("browse")} disabled={!session.seerr}>
+              Browse
+            </button>
+            <button className={view === "calendar" ? "on" : ""} onClick={() => show("calendar")}>
+              Calendar
+            </button>
+          </div>
+          {session.seerr ? (
+            <Link className="btn-ghost" to="/requests">
+              My requests
+            </Link>
+          ) : null}
+        </div>
       </header>
+      {view === "calendar" ? <Calendar /> : <Browse rows={rows} error={error} loading={loading && !data} onOpen={picker.open} />}
+      {picker.sheet}
+    </div>
+  );
+}
+
+function Browse({ rows, error, loading, onOpen }: { rows: Record<string, SeerrResult[]>; error?: string; loading: boolean; onOpen: (result: SeerrResult) => void }) {
+  return (
+    <>
       {error ? <p className="empty">{error}</p> : null}
-      {loading && !data ? <p className="empty">Loading…</p> : null}
+      {loading ? <p className="empty">Loading…</p> : null}
       {DISCOVER_LISTS.map((list) =>
         rows[list.slug]?.length ? (
           <Row key={list.slug} title={list.title} action={{ label: "See all", to: `/discover/${list.slug}` }}>
             {rows[list.slug].map((result) => (
-              <SeerrCard key={`${result.mediaType}-${result.id}`} result={result} onOpen={picker.open} />
+              <SeerrCard key={`${result.mediaType}-${result.id}`} result={result} onOpen={onOpen} />
             ))}
           </Row>
         ) : null,
       )}
-      {picker.sheet}
-    </div>
+    </>
   );
 }
 

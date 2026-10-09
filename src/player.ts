@@ -21,6 +21,8 @@ export type PlayRequest = {
   segments: string;
   nextTitle: string;
   autoSkip: boolean;
+  /** Cheaper scaling and no dithering, for weak GPUs. */
+  lowPower?: boolean;
   artist: string;
   /** Shown by desktop media widgets, so it must never carry the access token. */
   artUrl: string;
@@ -60,6 +62,25 @@ export async function playerFocus() {
   if (!inTauri()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("player_focus");
+}
+
+/** False when there is no embedded player to shrink (only macOS has one). */
+export async function playerMini(on: boolean) {
+  if (!inTauri()) return false;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<boolean>("player_mini", { on });
+}
+
+/** The player left mini mode on its own, e.g. for fullscreen. */
+export async function listenMiniExit(handler: () => void) {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("player-mini", () => handler());
+}
+
+/** The player's picture-in-picture button or the P key. */
+export async function listenMiniToggle(handler: () => void) {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("player-mini-toggle", () => handler());
 }
 
 export async function listenThumbRequests(handler: (request: { time: number; width: number }) => void) {

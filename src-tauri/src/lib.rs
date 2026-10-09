@@ -10,7 +10,7 @@ mod stats;
 mod trailer;
 
 use downloads::{download_delete, download_dir, download_list, download_progress, download_start};
-use mpv::{player_focus, player_play, player_request, player_stop, player_thumb, PlayerState};
+use mpv::{player_focus, player_mini, player_play, player_request, player_stop, player_thumb, PlayerState};
 use stats::open_stats;
 use trailer::{play_trailer, trailer_stream};
 use tauri::Manager;
@@ -31,6 +31,12 @@ pub fn run() {
                         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
                     }
                 });
+            }
+            // The web app draws its own title bar with caption buttons (TitleBar.tsx).
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+                let _ = window.set_shadow(true);
             }
             #[cfg(target_os = "macos")]
             libmpv::install_key_forwarding(app.handle());
@@ -55,6 +61,7 @@ pub fn run() {
             player_play,
             player_request,
             player_focus,
+            player_mini,
             player_stop,
             player_thumb,
             download_list,

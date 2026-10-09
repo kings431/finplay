@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { IconBack, IconPause, IconPlay } from "../icons";
 import { backdropUrl, formatClock } from "../media";
 import { playerRequest } from "../player";
-import { methodHint, usePlayback } from "../playback";
+import { methodHint, usePlayback, usePlaybackClock } from "../playback";
 import { useSession } from "../session";
 import type { MpvTrack } from "../types";
 
 export function Playing() {
   const session = useSession();
-  const { active, position, duration, paused, finished, stop, togglePause, seek } = usePlayback();
+  const { active, stop, togglePause, seek } = usePlayback();
+  const { position, duration, paused, finished } = usePlaybackClock();
   const [tracks, setTracks] = useState<MpvTrack[]>([]);
   const [scrub, setScrub] = useState<number | null>(null);
 

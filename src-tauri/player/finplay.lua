@@ -6,7 +6,7 @@ local assdraw = require("mp.assdraw")
 
 local opts = {
     badge = "", embedded = false, handoff = false, trickplay = false,
-    segments = "", next = "", autoskip = false,
+    segments = "", next = "", autoskip = false, pip = false, mini = false,
 }
 options.read_options(opts, "finplay")
 
@@ -35,6 +35,8 @@ local state = {
     upnext_cancelled = false,
     next_sent = false,
     last_tick = nil,
+    -- Shrunk into a corner of Finplay while the library is browsed.
+    mini = opts.mini,
 }
 
 local THUMB_OVERLAY = 7
@@ -218,6 +220,21 @@ local function icon_fullscreen(cx, cy, u)
     end
 end
 
+local function icon_pip(cx, cy, u)
+    outline(rrect(cx - u * 0.4, cy - u * 0.3, u * 0.8, u * 0.6, u * 0.08), u * 0.065)
+    if state.mini then
+        shape(rrect(cx - u * 0.26, cy - u * 0.17, u * 0.3, u * 0.2, u * 0.04), "FFFFFF")
+    else
+        shape(rrect(cx - u * 0.04, cy - u * 0.03, u * 0.3, u * 0.2, u * 0.04), "FFFFFF")
+    end
+end
+
+local function icon_close(cx, cy, u)
+    local s, w = u * 0.24, u * 0.11
+    line(cx - s, cy - s, cx + s, cy + s, w, "FFFFFF")
+    line(cx - s, cy + s, cx + s, cy - s, w, "FFFFFF")
+end
+
 local function icon_chapters(cx, cy, u)
     local w = u * 0.07
     for index = -1, 1 do
@@ -253,6 +270,12 @@ local function toggle_fullscreen()
         app_message("finplay-fullscreen")
     else
         mp.command("cycle fullscreen")
+    end
+end
+
+local function toggle_mini()
+    if opts.pip then
+        app_message("finplay-mini")
     end
 end
 
@@ -363,13 +386,16 @@ end
 -- Drawing.
 
 local function gradient(y, h, dark_at_top)
-    local steps = 14
+    local steps = math.max(16, math.floor(h / 4))
     local step = h / steps
     for index = 0, steps - 1 do
         local t = (index + 0.5) / steps
         local darkness = dark_at_top and (1 - t) or t
         local alpha = 255 - math.floor((darkness ^ 1.5) * 190)
-        shape(rect(0, y + step * index, width, step + 0.6), "000000", string.format("%02X", alpha))
+        -- Whole-pixel bands that meet exactly; overlapping ones leave darker seams on bright video.
+        local top = math.floor(y + step * index)
+        local bottom = math.floor(y + step * (index + 1))
+        shape(rect(0, top, width, bottom - top), "000000", string.format("%02X", alpha))
     end
 end
 
@@ -739,6 +765,12 @@ local function render()
 
     local skip_segment = update_markers(mp.get_property_number("time-pos") or 0, paused, ended)
     local show_controls = not ((idle or away) and not paused and not ended and not state.menu and not state.dragging)
+    -- mpv cannot hide the cursor once Finplay hosts its video, so Finplay does.
+    local hide_cursor = opts.embedded and not show_controls and not away and not state.mini
+    if hide_cursor ~= state.cursor_hidden then
+        state.cursor_hidden = hide_cursor
+        if hide_cursor then mp.commandv("script-message", "finplay-hide-cursor") end
+    end
     local show_toast = state.toast and t < state.toast_until
     local show_extra = skip_segment ~= nil or state.upnext ~= nil
     if width == 0 or (not show_controls and not show_toast and not show_extra) then
@@ -746,12 +778,17 @@ local function render()
         if not state.blank then
             mp.set_osd_ass(width, height, "")
             state.blank = true
+            state.last_ass = ""
         end
         return
     end
     state.blank = false
 
-    scale = clamp(math.min(width / 1400, height / 820), 0.7, 2)
+    if state.mini then
+        scale = clamp(math.min(width / 900, height / 506), 0.5, 1)
+    else
+        scale = clamp(math.min(width / 1400, height / 820), 0.7, 2)
+    end
     local pad = 28 * scale
     ass = assdraw.ass_new()
 
@@ -763,26 +800,38 @@ local function render()
         gradient(0, 150 * scale, true)
         gradient(height - 170 * scale, 170 * scale, false)
 
-        -- Top bar: back, title, track menus, fullscreen.
         local top = pad + 22 * scale
-        round_button(pad + 22 * scale, top, 22 * scale, icon_back, go_back, true)
-        local title = mp.get_property("force-media-title") or mp.get_property("media-title") or ""
-        text(pad + 60 * scale, top - 2 * scale, 1, 20 * scale, title, "FFFFFF", "\\b1\\q2")
-        local badge = opts.badge
-        if ended then
-            badge = "Finished"
-        elseif badge == "" and paused then
-            badge = "Paused"
-        end
-        if badge ~= "" then
-            text(pad + 60 * scale, top + 3 * scale, 7, 13 * scale, badge, "C8C8D0", "\\q2")
-        end
         local right = width - pad - 22 * scale
-        round_button(right, top, 22 * scale, icon_fullscreen, toggle_fullscreen, true)
-        round_button(right - 54 * scale, top, 22 * scale, icon_speed, function() open_menu("speed") end, true)
-        round_button(right - 108 * scale, top, 22 * scale, icon_chapters, function() open_menu("chapter") end, true)
-        round_button(right - 162 * scale, top, 22 * scale, icon_subtitles, function() open_menu("sub") end, true)
-        round_button(right - 216 * scale, top, 22 * scale, icon_audio, function() open_menu("audio") end, true)
+        if state.mini then
+            -- Mini: close and expand only; menus need the full player.
+            round_button(pad + 22 * scale, top, 22 * scale, icon_close, go_back, true)
+            round_button(right, top, 22 * scale, icon_pip, toggle_mini, true)
+        else
+            -- Top bar: back, title, track menus, picture-in-picture, fullscreen.
+            round_button(pad + 22 * scale, top, 22 * scale, icon_back, go_back, true)
+            local title = mp.get_property("force-media-title") or mp.get_property("media-title") or ""
+            text(pad + 60 * scale, top - 2 * scale, 1, 20 * scale, title, "FFFFFF", "\\b1\\q2")
+            local badge = opts.badge
+            if ended then
+                badge = "Finished"
+            elseif badge == "" and paused then
+                badge = "Paused"
+            end
+            if badge ~= "" then
+                text(pad + 60 * scale, top + 3 * scale, 7, 13 * scale, badge, "C8C8D0", "\\q2")
+            end
+            local buttons = { { icon_fullscreen, toggle_fullscreen } }
+            if opts.pip then
+                buttons[#buttons + 1] = { icon_pip, toggle_mini }
+            end
+            buttons[#buttons + 1] = { icon_speed, function() open_menu("speed") end }
+            buttons[#buttons + 1] = { icon_chapters, function() open_menu("chapter") end }
+            buttons[#buttons + 1] = { icon_subtitles, function() open_menu("sub") end }
+            buttons[#buttons + 1] = { icon_audio, function() open_menu("audio") end }
+            for index, button in ipairs(buttons) do
+                round_button(right - (index - 1) * 54 * scale, top, 22 * scale, button[1], button[2], true)
+            end
+        end
 
         -- Centre transport.
         local cx, cy = width / 2, height / 2
@@ -818,7 +867,7 @@ local function render()
             shape(circle(track_x + track_w * ratio, bar_y, 8 * scale), "FFFFFF")
             if duration > 0 then
                 local hover_ratio = state.dragging and state.drag_ratio or seek_ratio(mouse_x)
-                if opts.trickplay then
+                if opts.trickplay and not state.mini then
                     request_thumb(hover_ratio * duration)
                     if state.thumb then
                         local tw, th = state.thumb.w, state.thumb.h
@@ -838,7 +887,7 @@ local function render()
         text(track_x + track_w, bar_y + 16 * scale, 9, 14 * scale,
             "-" .. format_time(math.max(0, duration - shown_position)), "C8C8D0")
 
-        if state.menu then
+        if state.menu and not state.mini then
             draw_menu(pad)
         end
     end
@@ -855,7 +904,12 @@ local function render()
         text(width / 2, pad + 18 * scale, 5, 15 * scale, state.toast, "FFFFFF", "\\b1")
     end
 
-    mp.set_osd_ass(width, height, ass.text)
+    -- An unchanged overlay would still make libass re-rasterise and mpv redraw.
+    local key = width .. "x" .. height .. ass.text
+    if key ~= state.last_ass then
+        state.last_ass = key
+        mp.set_osd_ass(width, height, ass.text)
+    end
 end
 
 local function active()
@@ -999,8 +1053,29 @@ mp.add_forced_key_binding("s", "finplay-subs", key(function() open_menu("sub") e
 mp.add_forced_key_binding("c", "finplay-chapters", key(function() open_menu("chapter") end))
 mp.add_forced_key_binding("[", "finplay-speed-down", key(function() nudge_speed(-1) end))
 mp.add_forced_key_binding("]", "finplay-speed-up", key(function() nudge_speed(1) end))
+mp.add_forced_key_binding("p", "finplay-pip", key(toggle_mini))
 
-mp.add_periodic_timer(0.1, safe(render))
+mp.register_script_message("finplay-mini-state", function(value)
+    state.mini = value == "yes"
+    state.menu = nil
+    hide_thumb()
+    active()
+    pcall(render)
+end)
+
+-- Mouse and key handlers render straight away, so a paused, untouched player
+-- only needs a slow refresh (for the clock and buffering state).
+local last_refresh = 0
+local function tick()
+    local t = now()
+    local busy = state.dragging or state.menu or (state.toast and t < state.toast_until) or t - state.last_activity < HIDE_AFTER
+    if mp.get_property_bool("pause") and not busy and t - last_refresh < 1 then
+        return
+    end
+    last_refresh = t
+    render()
+end
+mp.add_periodic_timer(0.1, safe(tick))
 mp.register_event("seek", active)
 mp.observe_property("pause", "bool", function() active() end)
 active()

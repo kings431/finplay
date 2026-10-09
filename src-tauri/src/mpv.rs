@@ -150,6 +150,8 @@ pub struct PlayRequest {
     #[serde(default)]
     auto_skip: bool,
     #[serde(default)]
+    low_power: bool,
+    #[serde(default)]
     artist: String,
     #[serde(default)]
     art_url: String,
@@ -286,6 +288,10 @@ fn needs_fullscreen_handoff(embedded: bool) -> bool {
 }
 
 fn toggle_fullscreen(shared: &Arc<Shared>) {
+    #[cfg(target_os = "macos")]
+    if crate::libmpv::take_mini() {
+        let _ = shared.app.emit("player-mini", false);
+    }
     // Embedded borderless child windows cannot take Spaces fullscreen on macOS
     // (AppKit throws NSGenericException). Restart in a normal mpv window with
     // --fs, then hand back when leaving fullscreen — same as Wayland.
@@ -455,6 +461,32 @@ pub fn player_focus(app: AppHandle, state: State<'_, PlayerState>) -> Result<(),
     Ok(())
 }
 
+/// Shrinks the embedded player into a corner of Finplay, or back. False when
+/// this platform or session has no embedded player to move.
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn player_mini(app: AppHandle, state: State<'_, PlayerState>, on: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let shared = lock(&state.inner).as_ref().map(|session| Arc::clone(&session.shared));
+        let playing = shared.as_ref().is_some_and(|shared| shared.embedded && !shared.handoff);
+        if (!on || playing) && crate::libmpv::set_mini(&app, on) {
+            if let Some(shared) = shared {
+                fire(&shared, json!(["script-message", "finplay-mini-state", if on { "yes" } else { "no" }]));
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn mini_now() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::libmpv::is_mini();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 #[tauri::command]
 pub async fn player_stop(state: State<'_, PlayerState>) -> Result<(), String> {
     let inner = Arc::clone(&state.inner);
@@ -594,6 +626,7 @@ fn start_player(
     std::fs::write(&script_path, include_str!("../player/finplay.lua"))
         .map_err(|err| format!("Could not write the player overlay: {err}"))?;
 
+    let can_mini = cfg!(target_os = "macos") && wid.is_some();
     let mut args: Vec<String> = vec![
         "--no-config".into(),
         "--input-terminal=no".into(),
@@ -606,19 +639,23 @@ fn start_player(
         "--osd-on-seek=no".into(),
         "--cursor-autohide=800".into(),
         "--hr-seek=yes".into(),
-        "--cache=yes".into(),
-        "--demuxer-max-bytes=256MiB".into(),
+        // Downloads are local files and need no read-ahead into RAM.
+        if request.download_id.is_empty() { "--cache=yes" } else { "--cache=auto" }.into(),
+        "--demuxer-max-bytes=128MiB".into(),
+        "--demuxer-max-back-bytes=32MiB".into(),
         "--demuxer-readahead-secs=20".into(),
         "--audio-display=no".into(),
         "--msg-level=all=warn".into(),
         format!("--input-ipc-server={sock}"),
         format!("--script={}", script_path.display()),
         format!(
-            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={}{}",
+            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={},finplay-pip={},finplay-mini={}{}",
             if wid.is_some() { "yes" } else { "no" },
             if handoff { "yes" } else { "no" },
             if request.trickplay { "yes" } else { "no" },
             if request.auto_skip { "yes" } else { "no" },
+            if can_mini { "yes" } else { "no" },
+            if can_mini && mini_now() { "yes" } else { "no" },
             if ytdl.is_empty() { String::new() } else { format!(",ytdl_hook-ytdl_path={ytdl}") }
         ),
         format!("--title=Finplay — {title}"),
@@ -626,6 +663,21 @@ fn start_player(
         format!("--start={}", request.start_seconds.max(0.0)),
         "--user-agent=Finplay/0.1.0".into(),
     ];
+    if request.low_power {
+        // mpv's "fast" profile, spelled out because older mpv builds lack it.
+        for option in [
+            "--scale=bilinear",
+            "--dscale=bilinear",
+            "--cscale=bilinear",
+            "--dither=no",
+            "--correct-downscaling=no",
+            "--linear-downscaling=no",
+            "--sigmoid-upscaling=no",
+            "--hdr-compute-peak=no",
+        ] {
+            args.push(option.into());
+        }
+    }
     let mut made_fullscreen = false;
     if let Some(wid) = wid {
         args.push(format!("--wid={wid}"));
@@ -935,6 +987,9 @@ fn read_loop(app: AppHandle, shared: Arc<Shared>, mut reader: BufReader<Box<dyn 
                         match value.pointer("/args/0").and_then(Value::as_str) {
                             Some("finplay-fullscreen") => toggle_fullscreen(&shared),
                             Some("finplay-escape") => escape(&shared),
+                            Some("finplay-mini") => {
+                                let _ = app.emit("player-mini-toggle", ());
+                            }
                             Some("finplay-back") => quit(&shared),
                             Some("finplay-next") => {
                                 let _ = app.emit("player-next", ());

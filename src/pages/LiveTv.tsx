@@ -8,6 +8,9 @@ import type { BaseItem } from "../types";
 
 const PX_PER_MINUTE = 6;
 const GUIDE_HOURS = 6;
+/** Matches `.guide-row` height in styles.css. */
+const GUIDE_ROW = 64;
+const GUIDE_BUFFER = 8;
 const CATEGORIES = [
   { id: "all", label: "All", match: () => true },
   { id: "movies", label: "Movies", match: (program?: BaseItem) => program?.IsMovie === true },
@@ -136,6 +139,35 @@ function Guide({ channels }: { channels: BaseItem[] }) {
   }, [offsetHours]);
   const end = useMemo(() => new Date(start.getTime() + GUIDE_HOURS * 3_600_000), [start]);
   const ids = useMemo(() => channels.map((channel) => channel.Id), [channels]);
+  // Only rows near the viewport are rendered; big lineups have hundreds of
+  // channels, each with a dozen programme buttons.
+  const [view, setView] = useState({ top: 0, height: 900 });
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      setView((current) =>
+        Math.abs(current.top - element.scrollTop) < GUIDE_ROW && current.height === element.clientHeight
+          ? current
+          : { top: element.scrollTop, height: element.clientHeight },
+      );
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    measure();
+    element.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      cancelAnimationFrame(frame);
+      element.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, []);
+  const firstRow = Math.max(0, Math.floor(view.top / GUIDE_ROW) - GUIDE_BUFFER);
+  const lastRow = Math.min(channels.length, Math.ceil((view.top + view.height) / GUIDE_ROW) + GUIDE_BUFFER);
 
   const { data, error } = useCached(`livetv:guide:${start.getTime()}:${ids.length}`, async () => {
     const lists = await Promise.all(
@@ -179,7 +211,8 @@ function Guide({ channels }: { channels: BaseItem[] }) {
               </span>
             ))}
           </div>
-          {channels.map((channel) => {
+          {firstRow > 0 ? <div style={{ height: firstRow * GUIDE_ROW }} /> : null}
+          {channels.slice(firstRow, lastRow).map((channel) => {
             const logo = primaryUrl(session, channel);
             return (
               <div key={channel.Id} className="guide-row">
@@ -216,6 +249,7 @@ function Guide({ channels }: { channels: BaseItem[] }) {
               </div>
             );
           })}
+          {lastRow < channels.length ? <div style={{ height: (channels.length - lastRow) * GUIDE_ROW }} /> : null}
           {nowLeft > 0 && nowLeft < width ? <span className="guide-now" style={{ left: 180 + nowLeft }} /> : null}
         </div>
       </div>

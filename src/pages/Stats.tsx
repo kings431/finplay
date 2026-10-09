@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCached } from "../cache";
 import { IconChart } from "../icons";
@@ -25,6 +25,9 @@ type Report = {
   seconds: number;
   users: number;
   titles: number;
+  days: number;
+  movieTitles: number;
+  episodeTitles: number;
   timeline: Slice[];
   monthly: boolean;
   hours: number[];
@@ -100,11 +103,11 @@ export function Stats() {
       {data ? (
         <>
           <div className="stat-tiles">
-            <Tile label="Plays" value={data.plays.toLocaleString()} />
-            <Tile label="Watch time" value={hours(data.seconds)} />
-            <Tile label="Viewers" value={data.users.toLocaleString()} />
-            <Tile label="Titles watched" value={data.titles.toLocaleString()} />
-            <Tile label="Direct play" value={directShare(data.methods)} hint="Plays that didn't need a transcode" />
+            <Tile label="Plays" value={data.plays.toLocaleString()} detail={perDay(data)} />
+            <Tile label="Watch time" value={hours(data.seconds)} detail={data.plays ? `${duration(Math.round(data.seconds / data.plays))} per play` : undefined} />
+            <Tile label="Viewers" value={data.users.toLocaleString()} detail={data.people[0] ? `Most active: ${data.people[0].label}` : undefined} />
+            <Tile label="Titles watched" value={data.titles.toLocaleString()} detail={`${data.movieTitles.toLocaleString()} movies · ${data.episodeTitles.toLocaleString()} episodes`} />
+            <Tile label="Direct play" value={directShare(data.methods)} detail={transcodes(data.methods)} />
           </div>
 
           <section className="stat-card wide-card">
@@ -112,7 +115,7 @@ export function Stats() {
               <h2>{data.monthly ? "Plays by month" : "Plays by day"}</h2>
               <small>{data.timeline.length ? `${data.timeline[0].label} to ${data.timeline[data.timeline.length - 1].label}` : ""}</small>
             </div>
-            <Timeline slices={data.timeline} />
+            <Timeline slices={data.timeline} monthly={data.monthly} />
           </section>
 
           <RankedRow title="Most watched movies" items={data.movies} />
@@ -242,40 +245,77 @@ function NowPlaying({ sessions }: { sessions: ActiveSession[] }) {
   );
 }
 
-function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Tile({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
-    <div className="stat-tile" title={hint}>
+    <div className="stat-tile">
       <small>{label}</small>
       <strong>{value}</strong>
+      {detail ? <em>{detail}</em> : null}
     </div>
   );
 }
 
-function Timeline({ slices }: { slices: Slice[] }) {
+function ChartTip({ index, count, lift, children }: { index: number; count: number; lift: number; children: ReactNode }) {
+  const left = ((index + 0.5) / count) * 100;
+  const edge = left < 12 ? " start" : left > 88 ? " end" : "";
+  return (
+    <div className={`chart-tip${edge}`} style={{ left: `${left}%`, bottom: `calc(${lift}% + 8px)` }}>
+      {children}
+    </div>
+  );
+}
+
+function Timeline({ slices, monthly }: { slices: Slice[]; monthly: boolean }) {
+  const [hover, setHover] = useState<number | null>(null);
   if (slices.length === 0) return <p className="stat-empty">No plays in this range.</p>;
   const max = Math.max(...slices.map((slice) => slice.plays), 1);
+  const height = (plays: number) => Math.max(2, (plays / max) * 100);
+  const shown = hover === null ? undefined : slices[hover];
   return (
-    <div className="timeline">
-      {slices.map((slice) => (
-        <div key={slice.label} className="timeline-bar" title={`${slice.label}: ${slice.plays} plays · ${hours(slice.seconds)}`}>
-          <span style={{ height: `${Math.max(2, (slice.plays / max) * 100)}%` }} />
+    <div className="timeline" onMouseLeave={() => setHover(null)}>
+      {slices.map((slice, index) => (
+        <div key={slice.label} className={`timeline-bar${index === hover ? " on" : ""}`} onMouseEnter={() => setHover(index)}>
+          <span style={{ height: `${height(slice.plays)}%` }} />
         </div>
       ))}
+      {shown && hover !== null ? (
+        <ChartTip index={hover} count={slices.length} lift={height(shown.plays)}>
+          <b>{bucketLabel(shown.label, monthly)}</b>
+          <span>
+            {shown.plays.toLocaleString()} {shown.plays === 1 ? "play" : "plays"} · {hours(shown.seconds)}
+          </span>
+          {shown.plays ? <small>{duration(Math.round(shown.seconds / shown.plays))} per play</small> : null}
+        </ChartTip>
+      ) : null}
     </div>
   );
 }
 
 function HourChart({ hours: counts }: { hours: number[] }) {
+  const [hover, setHover] = useState<number | null>(null);
   const max = Math.max(...counts, 1);
+  const total = counts.reduce((sum, count) => sum + count, 0);
   const peak = counts.indexOf(Math.max(...counts));
+  const height = (count: number) => Math.max(3, (count / max) * 100);
   return (
     <>
-      <div className="hour-chart">
+      <div className="hour-chart" onMouseLeave={() => setHover(null)}>
         {counts.map((count, hour) => (
-          <div key={hour} className={`hour-bar${hour === peak && count > 0 ? " peak" : ""}`} title={`${hourLabel(hour)}: ${count} plays`}>
-            <span style={{ height: `${Math.max(3, (count / max) * 100)}%` }} />
+          <div key={hour} className={`hour-bar${hour === peak && count > 0 ? " peak" : ""}${hour === hover ? " on" : ""}`} onMouseEnter={() => setHover(hour)}>
+            <span style={{ height: `${height(count)}%` }} />
           </div>
         ))}
+        {hover !== null ? (
+          <ChartTip index={hover} count={24} lift={height(counts[hover])}>
+            <b>
+              {hourLabel(hover)} – {hourLabel((hover + 1) % 24)}
+            </b>
+            <span>
+              {counts[hover].toLocaleString()} {counts[hover] === 1 ? "play" : "plays"}
+            </span>
+            {total ? <small>{share(counts[hover], total)} of all plays</small> : null}
+          </ChartTip>
+        ) : null}
       </div>
       <div className="hour-axis">
         <span>12am</span>
@@ -292,10 +332,14 @@ function HourChart({ hours: counts }: { hours: number[] }) {
 function Bars({ slices, measure }: { slices: Slice[]; measure: "plays" | "seconds" }) {
   if (slices.length === 0) return <p className="stat-empty">Nothing yet.</p>;
   const max = Math.max(...slices.map((slice) => slice[measure]), 1);
+  const total = slices.reduce((sum, slice) => sum + slice[measure], 0);
   return (
     <div className="bars">
       {slices.map((slice) => (
         <div key={slice.label} className="bar-row">
+          <span className="bar-tip">
+            {slice.plays.toLocaleString()} {slice.plays === 1 ? "play" : "plays"} · {hours(slice.seconds)} · {share(slice[measure], total)}
+          </span>
           <span className="bar-label">{slice.label}</span>
           <span className="bar-track">
             <span style={{ width: `${(slice[measure] / max) * 100}%` }} />
@@ -373,7 +417,7 @@ async function buildReport(client: Jellyfin, days: number): Promise<Report> {
   const sum = `CAST(${seconds} AS TEXT)`;
   const query = (sql: string) => client.playbackQuery(sql);
   const [totals, timeline, hourly, people, movies, shows, clients, methods, recent] = await Promise.all([
-    query(`SELECT COUNT(*), ${sum}, COUNT(DISTINCT UserId), COUNT(DISTINCT ItemId) FROM PlaybackActivity ${where}`),
+    query(`SELECT COUNT(*), ${sum}, COUNT(DISTINCT UserId), COUNT(DISTINCT ItemId), COUNT(DISTINCT CASE WHEN ItemType = 'Movie' THEN ItemId END), COUNT(DISTINCT CASE WHEN ItemType = 'Episode' THEN ItemId END) FROM PlaybackActivity ${where}`),
     query(`SELECT ${bucket} AS bucket, COUNT(*), ${sum} FROM PlaybackActivity ${where} GROUP BY bucket ORDER BY bucket`),
     query(`SELECT strftime('%H', DateCreated) AS hour, COUNT(*) FROM PlaybackActivity ${where} GROUP BY hour`),
     query(`SELECT UserId, COUNT(*), ${sum} FROM PlaybackActivity ${where} GROUP BY UserId ORDER BY ${seconds} DESC LIMIT 8`),
@@ -417,6 +461,9 @@ async function buildReport(client: Jellyfin, days: number): Promise<Report> {
     seconds: Number(total?.[1]) || 0,
     users: Number(total?.[2]) || 0,
     titles: Number(total?.[3]) || 0,
+    days,
+    movieTitles: Number(total?.[4]) || 0,
+    episodeTitles: Number(total?.[5]) || 0,
     timeline: timeline.map(([label, plays, seconds]) => ({ label: label ?? "", plays: Number(plays) || 0, seconds: Number(seconds) || 0 })),
     monthly,
     hours,
@@ -460,6 +507,33 @@ function directShare(methods: Slice[]) {
   if (!total) return "–";
   const direct = methods.filter((method) => !method.label.startsWith("Transcode")).reduce((sum, method) => sum + method.plays, 0);
   return `${Math.round((direct / total) * 100)}%`;
+}
+
+function transcodes(methods: Slice[]) {
+  const count = methods.filter((method) => method.label.startsWith("Transcode")).reduce((sum, method) => sum + method.plays, 0);
+  return count ? `${count.toLocaleString()} ${count === 1 ? "play" : "plays"} transcoded` : "Nothing transcoded";
+}
+
+function perDay(report: Report) {
+  const span = report.days || report.timeline.length * 30.4;
+  if (!report.plays || !span) return undefined;
+  const rate = report.plays / span;
+  return `About ${rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1)} a day`;
+}
+
+function share(part: number, total: number) {
+  if (!total) return "0%";
+  const percent = (part / total) * 100;
+  return percent > 0 && percent < 1 ? "<1%" : `${Math.round(percent)}%`;
+}
+
+function bucketLabel(label: string, monthly: boolean) {
+  const [year, month, day] = label.split("-").map(Number);
+  if (!year || !month) return label;
+  const date = new Date(year, month - 1, day || 1);
+  return monthly
+    ? date.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 
 function spaced(label: string) {

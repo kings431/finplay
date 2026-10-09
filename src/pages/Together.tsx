@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { formatClock, playbackTitle } from "../media";
-import { usePlayback } from "../playback";
+import { usePlayback, usePlaybackClock } from "../playback";
 import { useSession } from "../session";
 import { useSyncPlay } from "../syncplay";
 import type { SyncGroup } from "../types";
@@ -16,7 +16,8 @@ const STATE_LABEL: Record<string, string> = {
 export function Together() {
   const { username } = useSession();
   const together = useSyncPlay();
-  const { active, position, duration, paused } = usePlayback();
+  const { active } = usePlayback();
+  const { position, duration, paused } = usePlaybackClock();
   const navigate = useNavigate();
   const [groups, setGroups] = useState<SyncGroup[] | null>(null);
   const [name, setName] = useState(`${username}'s room`);
@@ -32,7 +33,7 @@ export function Together() {
         .then((list) => !cancel && setGroups(list))
         .catch(() => !cancel && setGroups([]));
     void refresh();
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(() => !document.hidden && void refresh(), 5000);
     return () => {
       cancel = true;
       window.clearInterval(timer);
