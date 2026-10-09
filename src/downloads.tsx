@@ -20,6 +20,8 @@ export type DownloadEntry = {
   positionDirty: boolean;
   played: boolean;
   images: Record<string, string>;
+  /** Smoothed bytes per second while downloading. */
+  rate?: number;
   folder: string;
 };
 
@@ -52,6 +54,17 @@ export function formatBytes(bytes: number) {
     unit += 1;
   }
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/** Rough time left, e.g. "~12 min left". Transcoded sizes are estimates. */
+export function formatEta(entry: DownloadEntry) {
+  if (entry.state !== "downloading" || !entry.rate || !entry.total) return "";
+  const left = (entry.total - entry.received) / entry.rate;
+  if (left <= 5) return "Finishing…";
+  if (left < 90) return `~${Math.ceil(left / 5) * 5} s left`;
+  const minutes = Math.round(left / 60);
+  if (minutes < 60) return `~${minutes} min left`;
+  return `~${Math.floor(minutes / 60)} h ${minutes % 60} min left`;
 }
 
 /** Local image for a download, through Tauri's asset protocol. */
@@ -194,6 +207,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
           images,
           expectedSize: Math.round(estimateSize(full, quality)),
           resumable: retry && !quality.height,
+          duration: quality.height ? ticksToSeconds(full.RunTimeTicks ?? source.RunTimeTicks) : 0,
         },
       });
     },

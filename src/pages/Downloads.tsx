@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { downloadImage, formatBytes, QUALITIES, useDownloads, type DownloadEntry } from "../downloads";
+import { downloadImage, formatBytes, formatEta, QUALITIES, useDownloads, type DownloadEntry } from "../downloads";
 import { IconPlay } from "../icons";
 import { episodeCode, formatRuntime, tile } from "../media";
 import { usePlayback } from "../playback";
@@ -48,7 +48,13 @@ function DownloadRow({ entry }: { entry: DownloadEntry }) {
       : entry.state === "queued"
         ? "Waiting…"
         : entry.state === "downloading"
-          ? `${formatBytes(entry.received)}${entry.total ? ` of ${formatBytes(entry.total)}` : ""} · ${entry.quality}`
+          ? [
+              `${formatBytes(entry.received)}${entry.total ? ` of ${entry.quality === "Original" ? "" : "~"}${formatBytes(entry.total)}` : ""}`,
+              entry.quality,
+              formatEta(entry),
+            ]
+              .filter(Boolean)
+              .join(" · ")
           : entry.error || "Download failed.";
 
   return (

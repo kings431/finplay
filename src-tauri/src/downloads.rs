@@ -37,6 +37,9 @@ pub struct Entry {
     played: bool,
     #[serde(default)]
     images: HashMap<String, String>,
+    /// Smoothed bytes per second while downloading.
+    #[serde(default, skip_deserializing)]
+    rate: f64,
     #[serde(default, skip_deserializing)]
     folder: String,
 }
@@ -61,12 +64,16 @@ pub struct StartRequest {
     expected_size: u64,
     #[serde(default)]
     resumable: bool,
+    /// Runtime in seconds, for transcoded (Matroska) downloads.
+    #[serde(default)]
+    duration: f64,
 }
 
 struct Job {
     url: String,
     images: Vec<ImageRequest>,
     resumable: bool,
+    duration: f64,
     cancel: Arc<AtomicBool>,
 }
 
@@ -122,11 +129,12 @@ impl Inner {
         let _ = app.emit("download", snapshot.unwrap_or_else(|| removed(id)));
     }
 
-    fn progress(&self, app: &AppHandle, id: &str, received: u64, total: u64) {
+    fn progress(&self, app: &AppHandle, id: &str, received: u64, total: u64, rate: f64) {
         {
             let mut store = self.lock();
             if let Some(entry) = store.entries.iter_mut().find(|entry| entry.id == id) {
                 entry.received = received;
+                entry.rate = rate;
                 if total > 0 {
                     entry.total = total;
                 }
@@ -146,6 +154,7 @@ impl Inner {
                 url: job.url.clone(),
                 images: job.images.clone(),
                 resumable: job.resumable,
+                duration: job.duration,
                 cancel: Arc::clone(&job.cancel),
             };
             let Some(entry) = store.entries.iter_mut().find(|entry| entry.id == id) else { return };
@@ -181,6 +190,7 @@ impl Inner {
             return;
         }
         entry.images = images;
+        entry.rate = 0.0;
         match result.and_then(|size| {
             fs::rename(&part, folder.join(&file))
                 .map(|_| size)
@@ -245,21 +255,36 @@ impl Inner {
         let mut reader = response.into_reader();
         let mut buffer = vec![0u8; 256 * 1024];
         let mut last = Instant::now();
+        let mut last_received = received;
+        let mut rate = 0.0;
         loop {
             if job.cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled.".into());
             }
-            let count = reader
-                .read(&mut buffer)
-                .map_err(|_| "The connection dropped. Retry to continue.".to_string())?;
+            let count = match reader.read(&mut buffer) {
+                Ok(count) => count,
+                Err(err) => {
+                    file.flush().map_err(|err| format!("Could not write the file: {err}"))?;
+                    // Jellyfin can cut a transcoded stream off instead of ending
+                    // it cleanly once the transcode finishes.
+                    if total == 0 && job.duration > 0.0 && transcode_complete(part, job.duration) {
+                        break;
+                    }
+                    return Err(format!("The connection dropped ({}). Retry to continue.", describe_io(err.kind())));
+                }
+            };
             if count == 0 {
                 break;
             }
             file.write_all(&buffer[..count]).map_err(|err| format!("Could not write the file: {err}"))?;
             received += count as u64;
-            if last.elapsed() >= Duration::from_millis(400) {
+            let elapsed = last.elapsed();
+            if elapsed >= Duration::from_millis(400) {
+                let instant = (received - last_received) as f64 / elapsed.as_secs_f64();
+                rate = if rate == 0.0 { instant } else { rate * 0.85 + instant * 0.15 };
                 last = Instant::now();
-                self.progress(app, id, received, total);
+                last_received = received;
+                self.progress(app, id, received, total, rate);
             }
         }
         file.flush().map_err(|err| format!("Could not write the file: {err}"))?;
@@ -271,6 +296,73 @@ impl Inner {
         }
         Ok(received)
     }
+}
+
+fn describe_io(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => "timed out",
+        ErrorKind::UnexpectedEof => "the server ended it early",
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => "the server closed it",
+        _ => "network error",
+    }
+}
+
+/// Reads an EBML variable-length integer: (value, length in bytes).
+fn vint(bytes: &[u8]) -> Option<(u64, usize)> {
+    let first = *bytes.first()?;
+    let length = first.leading_zeros() as usize + 1;
+    if length > 8 || bytes.len() < length {
+        return None;
+    }
+    let mut value = (first as u64) & (0xFF >> length);
+    for byte in &bytes[1..length] {
+        value = (value << 8) | *byte as u64;
+    }
+    Some((value, length))
+}
+
+/// Timestamp in seconds of the last Matroska cluster in the file's tail.
+/// Assumes ffmpeg's default 1 ms timestamp scale.
+fn matroska_end(path: &Path) -> Option<f64> {
+    use std::io::{Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024 * 1024;
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL))).ok()?;
+    let mut tail = Vec::new();
+    file.take(TAIL).read_to_end(&mut tail).ok()?;
+    let mut best: Option<u64> = None;
+    for at in 0..tail.len().saturating_sub(8) {
+        if tail[at..at + 4] != [0x1F, 0x43, 0xB6, 0x75] {
+            continue;
+        }
+        let Some((_, size_len)) = vint(&tail[at + 4..]) else { continue };
+        let mut timecode = at + 4 + size_len;
+        if tail.get(timecode) == Some(&0xBF) {
+            let Some((crc, crc_len)) = tail.get(timecode + 1..).and_then(vint) else { continue };
+            timecode += 1 + crc_len + crc as usize;
+        }
+        if tail.get(timecode) != Some(&0xE7) {
+            continue;
+        }
+        let Some((width, width_len)) = tail.get(timecode + 1..).and_then(vint) else { continue };
+        let start = timecode + 1 + width_len;
+        if !(1..=8).contains(&width) || tail.len() < start + width as usize {
+            continue;
+        }
+        let ms = tail[start..start + width as usize].iter().fold(0u64, |acc, byte| (acc << 8) | *byte as u64);
+        if ms < 7 * 24 * 3600 * 1000 {
+            best = Some(best.map_or(ms, |current| current.max(ms)));
+        }
+    }
+    best.map(|ms| ms as f64 / 1000.0)
+}
+
+/// Whether a transcoded download reaches the end of the title. Clusters are a
+/// few seconds long, so the last one starts a little before the end.
+fn transcode_complete(path: &Path, duration: f64) -> bool {
+    matroska_end(path).is_some_and(|end| end >= duration - (duration * 0.01).max(15.0))
 }
 
 fn removed(id: &str) -> Entry {
@@ -288,6 +380,7 @@ fn removed(id: &str) -> Entry {
         position_dirty: false,
         played: false,
         images: HashMap::new(),
+        rate: 0.0,
         folder: String::new(),
     }
 }
@@ -414,11 +507,13 @@ pub fn download_start(app: AppHandle, state: State<'_, Downloads>, request: Star
             position_dirty: false,
             played,
             images: HashMap::new(),
+            rate: 0.0,
             folder: String::new(),
         });
+        let duration = if request.duration.is_finite() { request.duration.max(0.0) } else { 0.0 };
         store.jobs.insert(
             request.id.clone(),
-            Job { url: request.url, images, resumable, cancel: Arc::new(AtomicBool::new(false)) },
+            Job { url: request.url, images, resumable, duration, cancel: Arc::new(AtomicBool::new(false)) },
         );
         state.inner.save(&store);
     }

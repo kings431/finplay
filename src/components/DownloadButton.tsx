@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { estimateSize, formatBytes, QUALITIES, useDownloads, type Quality } from "../downloads";
+import { estimateSize, formatBytes, formatEta, QUALITIES, useDownloads, type Quality } from "../downloads";
 import { IconDownload, IconDownloaded } from "../icons";
 import type { BaseItem } from "../types";
 import { Popover } from "./Popover";
@@ -67,7 +67,14 @@ export function DownloadButton({ item }: { item: BaseItem }) {
           ) : active ? (
             <>
               <p className="menu-head">
-                {entry.state === "queued" ? "Waiting to download" : `Downloading · ${formatBytes(entry.received)}${entry.total ? ` of ${formatBytes(entry.total)}` : ""}`}
+                {entry.state === "queued"
+                  ? "Waiting to download"
+                  : [
+                      `Downloading · ${formatBytes(entry.received)}${entry.total ? ` of ${entry.quality === "Original" ? "" : "~"}${formatBytes(entry.total)}` : ""}`,
+                      formatEta(entry),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
               </p>
               <button className="menu-row danger" onClick={() => void remove(item.Id).then(() => setOpen(false))}>
                 Cancel download
