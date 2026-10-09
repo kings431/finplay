@@ -3,6 +3,7 @@
     "resources": ["libmpv/"],
     "macOS": {
       "signingIdentity": "-",
+      "hardenedRuntime": false,
       "minimumSystemVersion": "14.0"
     }
   }
