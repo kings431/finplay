@@ -120,7 +120,13 @@ jobs:
           releaseName: Finplay ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseBody: |
             **Linux:** use the AppImage (updates itself), or the .deb / .rpm, which install mpv for you. With the AppImage, install mpv from your distro.
-            **macOS** (14+ on Apple Silicon, 15+ on Intel): pick `aarch64` for Apple Silicon or `x64` for Intel. The player is built in. The app isn't notarized, so the first time macOS blocks it, open System Settings → Privacy & Security and choose Open Anyway.
+            **macOS** (14+ on Apple Silicon, 15+ on Intel): pick `aarch64` for Apple Silicon or `x64` for Intel. The player is built in.
+            Finplay isn't notarized by Apple, so the first launch shows "Finplay Not Opened". Click **Done** (not Move to Trash), then either:
+            - open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to Finplay, and confirm with your password; or
+            - run `xattr -dr com.apple.quarantine /Applications/Finplay.app` in Terminal.
+
+            After that it opens normally, including after updates.
+
             **Windows:** mpv is built in. SmartScreen may warn because the installer isn't code-signed; choose More info → Run anyway.
 
             Windows builds include [mpv](https://mpv.io) ${{ env.MPV_VERSION }} and macOS builds include libmpv and FFmpeg from Homebrew. These are free software under the GPL/LGPL; sources are at https://github.com/mpv-player/mpv and https://ffmpeg.org.
