@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Poster, RankCard, Row, WideCard } from "../components/Cards";
 import { markRequested, SeerrCard, useSeerrPicker } from "../components/RequestSheet";
@@ -15,6 +15,10 @@ const DECADES = [1970, 1980, 1990, 2000, 2010];
 const GENRE_ROWS = 6;
 const DISCOVERY_MAX_AGE = 20 * 60 * 1000;
 const HERO_INTERVAL = 7000;
+/** Quiet time after the last wheel event that ends a swipe gesture. */
+const SWIPE_SETTLE = 150;
+/** Shortest time between two swipe steps. */
+const SWIPE_MIN_GAP = 180;
 
 type HomeRow = {
   key: string;
@@ -38,15 +42,7 @@ export function Home() {
       client.nextUp(),
       client.latest(undefined, "Movie"),
       client.latest(undefined, "Series"),
-      items(
-        client.items({
-          includeItemTypes: BROWSE,
-          filters: "IsUnplayed",
-          sortBy: "Random",
-          limit: 10,
-          extra: { ImageTypes: "Backdrop", MinCommunityRating: "6.5" },
-        }),
-      ),
+      heroPicks(client),
     ]);
     return {
       resume: resumeList.Items ?? [],
@@ -82,6 +78,14 @@ export function Home() {
     setHeroIndex((current) => (current + delta + heroes.length) % heroes.length);
     setPaused(true);
   };
+  // A trackpad swipe sends dozens of wheel events plus momentum; step once per gesture.
+  const swipe = useRef<{ locked: boolean; peak: number; floor: number; at: number; timer?: number }>({
+    locked: false,
+    peak: 0,
+    floor: Infinity,
+    at: 0,
+  });
+  useEffect(() => () => window.clearTimeout(swipe.current.timer), []);
 
   const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
   const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
@@ -96,9 +100,31 @@ export function Home() {
         onMouseLeave={() => setPaused(false)}
         onWheel={(event) => {
           if (heroes.length <= 1) return;
-          const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) && Math.abs(event.deltaX) > 8;
-          if (!horizontal) return;
-          event.preventDefault();
+          const state = swipe.current;
+          const speed = Math.abs(event.deltaX);
+          const horizontal = speed > Math.abs(event.deltaY) && speed > 8;
+          const now = performance.now();
+          window.clearTimeout(state.timer);
+          state.timer = window.setTimeout(() => (state.locked = false), SWIPE_SETTLE);
+          if (state.locked) {
+            // Momentum only slows down, and WebKit's merged events jitter, so a
+            // new flick must climb well above the slowest speed since the peak.
+            if (speed === 0) return;
+            if (state.floor === Infinity) {
+              if (speed >= state.peak) state.peak = speed;
+              else state.floor = speed;
+              return;
+            }
+            if (speed < state.floor) state.floor = speed;
+            const fresh = horizontal && speed >= Math.max(16, state.floor * 3) && now - state.at > SWIPE_MIN_GAP;
+            if (!fresh) return;
+          } else if (!horizontal) {
+            return;
+          }
+          state.locked = true;
+          state.peak = speed;
+          state.floor = Infinity;
+          state.at = now;
           stepHero(event.deltaX > 0 ? 1 : -1);
         }}
       >
@@ -261,6 +287,31 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
 
 function items(request: Promise<ItemList>) {
   return request.then((list) => list.Items ?? []).catch(() => [] as BaseItem[]);
+}
+
+/**
+ * Random unwatched, well-rated titles for the hero. Jellyfin answers one
+ * Movie+Series random query several times slower than the two apart, so ask
+ * separately and mix in proportion to how many of each the library has.
+ */
+async function heroPicks(client: Jellyfin, count = 10) {
+  const query = (includeItemTypes: string) =>
+    client
+      .items({
+        includeItemTypes,
+        filters: "IsUnplayed",
+        sortBy: "Random",
+        limit: count,
+        extra: { ImageTypes: "Backdrop", MinCommunityRating: "6.5" },
+      })
+      .catch(() => ({ Items: [], TotalRecordCount: 0 }) as ItemList);
+  const [movies, series] = await Promise.all([query("Movie"), query("Series")]);
+  const movieItems = movies.Items ?? [];
+  const seriesItems = series.Items ?? [];
+  const total = (movies.TotalRecordCount ?? 0) + (series.TotalRecordCount ?? 0);
+  const movieShare = total ? Math.round((count * (movies.TotalRecordCount ?? 0)) / total) : count;
+  const takeMovies = Math.min(movieItems.length, Math.max(movieShare, count - seriesItems.length));
+  return shuffle([...movieItems.slice(0, takeMovies), ...seriesItems.slice(0, count - takeMovies)]);
 }
 
 function decadeYears(decade: number) {
