@@ -1,9 +1,14 @@
-//! Runs mpv inside Finplay through libmpv. macOS only lets a process draw
-//! into its own windows, so `--wid` (an NSView pointer there) works only
-//! in-process. The bundled libmpv is loaded at runtime, and the player is
-//! still driven over its JSON IPC socket exactly like the mpv process is.
+//! Runs mpv inside Finplay through libmpv. mpv's macOS video outputs ignore
+//! `--wid` and always open their own window, so the player window is made a
+//! borderless child of Finplay's window, laid over its content area; AppKit
+//! window pointers are only usable in-process. The bundled libmpv is loaded
+//! at runtime, and the player is still driven over its JSON IPC socket
+//! exactly like the mpv process is.
 
 use libloading::Library;
+use objc2::encode::{Encode, Encoding};
+use objc2::msg_send;
+use objc2::runtime::AnyObject;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,6 +26,8 @@ type WaitEvent = unsafe extern "C" fn(*mut c_void, f64) -> *const c_int;
 type Destroy = unsafe extern "C" fn(*mut c_void);
 type ErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 type RequestLog = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+type GetPropertyString = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
+type Free = unsafe extern "C" fn(*mut c_void);
 
 struct Api {
     create: Create,
@@ -31,6 +38,8 @@ struct Api {
     destroy: Destroy,
     error_string: ErrorString,
     request_log: RequestLog,
+    get_property_string: GetPropertyString,
+    free: Free,
 }
 
 /// Loaded once and never unloaded; libmpv does not survive being unloaded.
@@ -61,6 +70,10 @@ fn api(path: &Path) -> Result<&'static Api, String> {
             destroy: *library.get::<Destroy>(b"mpv_terminate_destroy\0").map_err(|err| err.to_string())?,
             error_string: *library.get::<ErrorString>(b"mpv_error_string\0").map_err(|err| err.to_string())?,
             request_log: *library.get::<RequestLog>(b"mpv_request_log_messages\0").map_err(|err| err.to_string())?,
+            get_property_string: *library
+                .get::<GetPropertyString>(b"mpv_get_property_string\0")
+                .map_err(|err| err.to_string())?,
+            free: *library.get::<Free>(b"mpv_free\0").map_err(|err| err.to_string())?,
         };
         Ok((library, api))
     });
@@ -75,6 +88,7 @@ pub struct LibMpv {
     api: &'static Api,
     /// Some while the core runs. The event thread takes it to destroy the core.
     alive: Arc<Mutex<Option<Handle>>>,
+    app: AppHandle,
 }
 
 fn cstring(text: &str) -> Result<CString, String> {
@@ -151,8 +165,94 @@ fn option_pair(arg: &str) -> Option<(String, String)> {
     Some((name, value))
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq)]
+struct Rect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+unsafe impl Encode for Rect {
+    const ENCODING: Encoding = Encoding::Struct(
+        "CGRect",
+        &[
+            Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]),
+            Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]),
+        ],
+    );
+}
+
+const NS_WINDOW_ABOVE: isize = 1;
+
+/// (player NSWindow, Finplay NSWindow) while the player is attached.
+/// Only touched on the main thread, as AppKit requires.
+static ATTACHED: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+
+fn host_window(app: &AppHandle) -> Option<usize> {
+    let window = app.get_webview_window("main")?;
+    window.ns_window().ok().map(|pointer| pointer as usize)
+}
+
+fn window_id(api: &Api, raw: *mut c_void) -> Option<usize> {
+    let name = cstring("window-id").ok()?;
+    let value = unsafe { (api.get_property_string)(raw, name.as_ptr()) };
+    if value.is_null() {
+        return None;
+    }
+    let text = unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned();
+    unsafe { (api.free)(value as *mut c_void) };
+    text.trim().parse::<i64>().ok().filter(|id| *id != 0).map(|id| id as usize)
+}
+
+/// Lays the player window over the host's content area.
+unsafe fn place(player: usize, host: usize) {
+    let (player, host) = (player as *mut AnyObject, host as *mut AnyObject);
+    let frame: Rect = msg_send![host, frame];
+    let content: Rect = msg_send![host, contentRectForFrameRect: frame];
+    let current: Rect = msg_send![player, frame];
+    if current != content {
+        let _: () = msg_send![player, setFrame: content, display: true];
+    }
+}
+
+fn attach(app: &AppHandle, player: usize) {
+    let Some(host) = host_window(app) else { return };
+    // AppKit may send window events synchronously; never hold the lock across it.
+    let fresh = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace((player, host)) != Some((player, host));
+    unsafe {
+        if fresh {
+            let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
+            let _: () = msg_send![window, setHasShadow: false];
+            let _: () = msg_send![parent, addChildWindow: window, ordered: NS_WINDOW_ABOVE];
+            let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        }
+        place(player, host);
+    }
+}
+
+fn detach() {
+    let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    let Some((player, host)) = attached else { return };
+    unsafe {
+        let (window, parent) = (player as *mut AnyObject, host as *mut AnyObject);
+        let _: () = msg_send![parent, removeChildWindow: window];
+        let _: () = msg_send![parent, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+    }
+}
+
+/// Keeps the player covering Finplay's content after the window moves,
+/// resizes or changes fullscreen. Call on the main thread.
+pub fn follow_host() {
+    let attached = *ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((player, host)) = attached {
+        unsafe { place(player, host) };
+    }
+}
+
 impl LibMpv {
-    pub fn start(path: &Path, args: &[String]) -> Result<Self, String> {
+    pub fn start(app: &AppHandle, path: &Path, args: &[String]) -> Result<Self, String> {
         let api = api(path)?;
         let raw = unsafe { (api.create)() };
         if raw.is_null() {
@@ -175,6 +275,11 @@ impl LibMpv {
         let mut options = vec![
             ("input-default-bindings".to_string(), "yes".to_string()),
             ("input-vo-keyboard".to_string(), "yes".to_string()),
+            // The window is resized to Finplay's content area, never by mpv.
+            ("border".to_string(), "no".to_string()),
+            ("title-bar".to_string(), "no".to_string()),
+            ("auto-window-resize".to_string(), "no".to_string()),
+            ("keepaspect-window".to_string(), "no".to_string()),
         ];
         let mut media = None;
         let mut rest = args.iter();
@@ -218,6 +323,7 @@ impl LibMpv {
         let alive = Arc::new(Mutex::new(Some(Handle(raw))));
         let watcher = Arc::clone(&alive);
         let events = raw as usize;
+        let events_app = app.clone();
         std::thread::spawn(move || {
             loop {
                 let event = unsafe { (api.wait_event)(events as *mut c_void, -1.0) };
@@ -225,12 +331,40 @@ impl LibMpv {
                     break;
                 }
             }
+            // Queued ahead of mpv closing its window on the main thread.
+            let _ = events_app.run_on_main_thread(detach);
             let handle = watcher.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
             if let Some(handle) = handle {
                 unsafe { (api.destroy)(handle.0) };
             }
         });
-        Ok(Self { api, alive })
+
+        let poll = Arc::clone(&alive);
+        let poll_app = app.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                let id = {
+                    let guard = poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let Some(handle) = guard.as_ref() else { return };
+                    window_id(api, handle.0)
+                };
+                if let Some(player) = id {
+                    // mpv may still size its window just after creating it.
+                    for delay in [0, 250, 1000] {
+                        std::thread::sleep(Duration::from_millis(delay));
+                        if poll.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none() {
+                            return;
+                        }
+                        let app = poll_app.clone();
+                        let _ = poll_app.run_on_main_thread(move || attach(&app, player));
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Ok(Self { api, alive, app: app.clone() })
     }
 
     pub fn exited(&self) -> bool {
@@ -240,6 +374,7 @@ impl LibMpv {
     /// Asks the core to quit and waits briefly for it to tear down. Bounded,
     /// because teardown hops to the main thread, which may be the caller.
     pub fn terminate(&mut self) {
+        let _ = self.app.run_on_main_thread(detach);
         {
             let guard = self.alive.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(handle) = guard.as_ref() {

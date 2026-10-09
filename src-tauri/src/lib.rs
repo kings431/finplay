@@ -32,6 +32,17 @@ pub fn run() {
                     }
                 });
             }
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                window.on_window_event(|event| {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+                    ) {
+                        libmpv::follow_host();
+                    }
+                });
+            }
             let handle = app.handle().clone();
             app.manage(mpris::Mpris::start(move |control| mpv::control(&handle, control)));
             app.manage(downloads::Downloads::new(app.handle()));

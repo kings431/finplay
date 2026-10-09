@@ -585,7 +585,7 @@ fn start_player(
     let library: Option<std::path::PathBuf> = None;
     let mut child = match library {
         #[cfg(target_os = "macos")]
-        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&path, &args)?),
+        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args)?),
         #[cfg(not(target_os = "macos"))]
         Some(_) => unreachable!(),
         None => {
