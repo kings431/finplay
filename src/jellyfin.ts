@@ -28,7 +28,7 @@ export class ApiError extends Error {
 }
 
 const CLIENT = "Finplay";
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const DEVICE = "Desktop";
 
 export function normalizeServer(input: string) {
