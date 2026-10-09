@@ -48,8 +48,36 @@ pub struct PlayerState {
     inner: Arc<Mutex<Option<Session>>>,
 }
 
+/// The running player: an mpv process, or on macOS libmpv inside Finplay.
+enum Engine {
+    Process(Child),
+    #[cfg(target_os = "macos")]
+    Library(crate::libmpv::LibMpv),
+}
+
+impl Engine {
+    fn exit_status(&mut self) -> Result<Option<String>, String> {
+        match self {
+            Engine::Process(child) => Ok(child.try_wait().map_err(|err| err.to_string())?.map(|status| status.to_string())),
+            #[cfg(target_os = "macos")]
+            Engine::Library(player) => Ok(player.exited().then(|| "shut down".to_string())),
+        }
+    }
+
+    fn terminate(&mut self) {
+        match self {
+            Engine::Process(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(target_os = "macos")]
+            Engine::Library(player) => player.terminate(),
+        }
+    }
+}
+
 struct Session {
-    child: Child,
+    child: Engine,
     shared: Arc<Shared>,
 }
 
@@ -160,6 +188,11 @@ pub async fn player_play(
         });
         request.fullscreen |= was_fullscreen;
         let mut wid = embed_target(&window);
+        // A separate mpv process can't draw into Finplay's window on macOS.
+        #[cfg(target_os = "macos")]
+        if crate::libmpv::locate(&app).is_none() {
+            wid = None;
+        }
         let handoff = wid.is_some() && request.fullscreen && wayland_session();
         if handoff {
             wid = None;
@@ -172,7 +205,8 @@ pub async fn player_play(
 }
 
 /// Native handle mpv can draw into with `--wid`. None on Wayland, where a
-/// client cannot host another process's surface.
+/// client cannot host another process's surface. On macOS it is an NSView
+/// pointer, usable only by libmpv running inside Finplay.
 fn embed_target(window: &WebviewWindow) -> Option<i64> {
     let (tx, rx) = mpsc::channel();
     let target = window.clone();
@@ -363,8 +397,7 @@ fn stop_player(inner: &Arc<Mutex<Option<Session>>>) {
         session.shared.stop.store(true, Ordering::SeqCst);
         session.shared.awake.set(false);
         mpris(&session.shared.app, Update::Stopped);
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+        session.child.terminate();
         restore_window(&session.shared);
         for slot in 0..2 {
             let _ = std::fs::remove_file(thumb_path(slot));
@@ -545,35 +578,47 @@ fn start_player(
     args.push("--".into());
     args.push(media);
 
-    let mut command = Command::new(&mpv_path);
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if wid.is_some() {
-        // mpv prefers Wayland when it can reach it, and Wayland ignores --wid.
-        command.env_remove("WAYLAND_DISPLAY");
-    }
-    let mut child = command.spawn().map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            format!("mpv was not found ({mpv_path}). Install mpv, or set its full path in Settings.")
-        } else {
-            format!("Could not start mpv: {err}")
-        }
-    })?;
-
     let stderr_tail = Arc::new(Mutex::new(String::new()));
-    if let Some(stderr) = child.stderr.take() {
-        let slot = Arc::clone(&stderr_tail);
-        thread::spawn(move || drain_stderr(stderr, slot));
-    }
+    #[cfg(target_os = "macos")]
+    let library = wid.and(crate::libmpv::locate(&app));
+    #[cfg(not(target_os = "macos"))]
+    let library: Option<std::path::PathBuf> = None;
+    let mut child = match library {
+        #[cfg(target_os = "macos")]
+        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&path, &args)?),
+        #[cfg(not(target_os = "macos"))]
+        Some(_) => unreachable!(),
+        None => {
+            let mut command = Command::new(&mpv_path);
+            command
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            crate::host_env::use_host_environment(&mut command);
+            if wid.is_some() {
+                // mpv prefers Wayland when it can reach it, and Wayland ignores --wid.
+                command.env_remove("WAYLAND_DISPLAY");
+            }
+            let mut process = command.spawn().map_err(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    format!("mpv was not found ({mpv_path}). Install mpv, or set its full path in Settings.")
+                } else {
+                    format!("Could not start mpv: {err}")
+                }
+            })?;
+            if let Some(stderr) = process.stderr.take() {
+                let slot = Arc::clone(&stderr_tail);
+                thread::spawn(move || drain_stderr(stderr, slot));
+            }
+            Engine::Process(process)
+        }
+    };
 
     let stream = match connect_ipc(&sock, &mut child, &stderr_tail) {
         Ok(stream) => stream,
         Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.terminate();
             if made_fullscreen {
                 if let Some(window) = main_window(&app) {
                     let _ = window.set_fullscreen(false);
@@ -652,11 +697,11 @@ fn start_player(
 
 fn connect_ipc(
     sock: &str,
-    child: &mut Child,
+    child: &mut Engine,
     stderr_tail: &Arc<Mutex<String>>,
 ) -> Result<IpcStream, String> {
     for _ in 0..100 {
-        if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+        if let Some(status) = child.exit_status()? {
             let detail = safe_detail(&lock(stderr_tail));
             if detail.is_empty() {
                 return Err(format!("mpv exited before it could play ({status})."));

@@ -1,5 +1,9 @@
 {
   "bundle": {
-    "resources": ["mpv/"]
+    "resources": ["libmpv/"],
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "14.0"
+    }
   }
 }

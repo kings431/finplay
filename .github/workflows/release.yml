@@ -25,14 +25,16 @@ jobs:
             args: ""
             rust-target: ""
             mpv: x86_64-w64-mingw32
-          - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-            rust-target: aarch64-apple-darwin
-            mpv: macos-14-arm
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            rust-target: x86_64-apple-darwin
-            mpv: macos-15-intel
+          # Native runners per arch: libmpv comes from Homebrew, whose
+          # libraries match the runner's architecture and macOS version.
+          - platform: macos-14
+            args: ""
+            rust-target: ""
+            mpv: ""
+          - platform: macos-15-intel
+            args: ""
+            rust-target: ""
+            mpv: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v5
@@ -43,18 +45,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev rpm
 
-      - name: Bundle mpv (macOS)
+      - name: Bundle libmpv (macOS)
         if: startsWith(matrix.platform, 'macos')
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          archive="mpv-$MPV_VERSION-${{ matrix.mpv }}.zip"
-          gh release download "$MPV_VERSION" -R mpv-player/mpv -p "$archive" -D "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP"
-          ditto -x -k "$archive" .
-          mkdir -p "$GITHUB_WORKSPACE/src-tauri/mpv"
-          tar -xzf mpv.tar.gz -C "$GITHUB_WORKSPACE/src-tauri/mpv"
-          test -x "$GITHUB_WORKSPACE/src-tauri/mpv/mpv.app/Contents/MacOS/mpv"
+          brew install mpv dylibbundler
+          dest="$GITHUB_WORKSPACE/src-tauri/libmpv"
+          mkdir -p "$dest"
+          cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" "$dest/"
+          chmod u+w "$dest/libmpv.2.dylib"
+          install_name_tool -id @loader_path/libmpv.2.dylib "$dest/libmpv.2.dylib"
+          dylibbundler -of -b -x "$dest/libmpv.2.dylib" -d "$dest" -p @loader_path/ -s "$(brew --prefix)/lib"
+          chmod u+w "$dest"/*.dylib
+          codesign --force --sign - "$dest"/*.dylib
+          leaked=0
+          for lib in "$dest"/*.dylib; do
+            if otool -L "$lib" | tail -n +2 | grep -E "$(brew --prefix)|/usr/local/(opt|Cellar|lib)"; then leaked=1; fi
+          done
+          test "$leaked" = 0
+          ls -la "$dest" | head -5
+          du -sh "$dest"
 
       - name: Bundle mpv (Windows)
         if: matrix.platform == 'windows-latest'
@@ -97,10 +106,10 @@ jobs:
           releaseName: Finplay ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseBody: |
             **Linux:** use the AppImage (updates itself), or the .deb / .rpm, which install mpv for you. With the AppImage, install mpv from your distro.
-            **macOS:** pick `aarch64` for Apple Silicon or `x64` for Intel. mpv is built in. The app isn't notarized, so after dragging it to Applications run `xattr -cr /Applications/Finplay.app` once.
+            **macOS** (14+ on Apple Silicon, 15+ on Intel): pick `aarch64` for Apple Silicon or `x64` for Intel. The player is built in. The app isn't notarized, so the first time macOS blocks it, open System Settings → Privacy & Security and choose Open Anyway.
             **Windows:** mpv is built in. SmartScreen may warn because the installer isn't code-signed; choose More info → Run anyway.
 
-            Windows and macOS builds include [mpv](https://mpv.io) ${{ env.MPV_VERSION }}, which is free software under the GPL/LGPL. Its source is at https://github.com/mpv-player/mpv/tree/${{ env.MPV_VERSION }}.
+            Windows builds include [mpv](https://mpv.io) ${{ env.MPV_VERSION }} and macOS builds include libmpv and FFmpeg from Homebrew. These are free software under the GPL/LGPL; sources are at https://github.com/mpv-player/mpv and https://ffmpeg.org.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

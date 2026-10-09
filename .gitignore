@@ -11,3 +11,4 @@ src-tauri/gen
 
 # mpv is downloaded into the Windows and macOS bundles by CI
 src-tauri/mpv/
+src-tauri/libmpv/

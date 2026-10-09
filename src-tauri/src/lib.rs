@@ -1,5 +1,9 @@
 mod awake;
+mod desktop_entry;
 mod downloads;
+mod host_env;
+#[cfg(target_os = "macos")]
+mod libmpv;
 mod mpris;
 mod mpv;
 mod stats;
@@ -17,6 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            std::thread::spawn(desktop_entry::install);
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.with_webview(|webview| {

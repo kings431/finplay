@@ -1371,12 +1371,14 @@ button.nav-btn { border: 0; background: none; }
 [data-theme="light"] .sidebar { box-shadow: 1px 0 0 var(--line); border-right: 0; }
 
 /* Apple TV: frosted glass chrome, bold type, artwork that lifts toward you. */
+/* WebKitGTK repaints the whole viewport on every scroll step, so the TV
+   theme's glow and card shadows are pre-rendered images: stretching a bitmap
+   is far cheaper than rasterising gradients and blurred box-shadows. */
 [data-theme="tv"] .app-shell {
-  background:
-    radial-gradient(1200px 700px at 85% -10%, rgba(90, 110, 255, 0.16), transparent 60%),
-    radial-gradient(900px 600px at -10% 110%, rgba(190, 80, 255, 0.1), transparent 60%),
-    var(--bg);
+  background: var(--bg) url("./assets/tv-glow.png") 0 0 / 100% 100% no-repeat;
+  image-rendering: pixelated;
 }
+[data-theme="tv"] .app-shell > * { image-rendering: auto; }
 [data-theme="tv"] .main { background: transparent; }
 [data-theme="tv"] .sidebar {
   margin: 12px 0 12px 12px;
@@ -1400,7 +1402,7 @@ button.nav-btn { border: 0; background: none; }
 [data-theme="tv"] .wide { width: 360px; }
 [data-theme="tv"] .poster-art,
 [data-theme="tv"] .wide-art,
-[data-theme="tv"] .episode-thumb { box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45); transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease; }
+[data-theme="tv"] .episode-thumb { border-image: url("./assets/tv-shadow.png") 44 / 44px / 22px 32px 42px stretch; transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease; }
 [data-theme="tv"] .poster:hover .poster-art,
 [data-theme="tv"] .wide:hover .wide-art,
 [data-theme="tv"] .rank-card:hover .poster-art,

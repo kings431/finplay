@@ -60,6 +60,7 @@ pub async fn play_trailer(app: AppHandle, url: String, title: String, mpv_path: 
             command.arg("--fs");
         }
         command.arg("--").arg(target.as_str()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        crate::host_env::use_host_environment(&mut command);
         if let Ok(mut child) = command.spawn() {
             std::thread::spawn(move || {
                 let _ = child.wait();
