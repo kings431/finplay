@@ -429,6 +429,9 @@ button.nav-btn { border: 0; background: none; }
   display: flex;
   gap: 14px;
   overflow-x: auto;
+  /* Otherwise overflow-y computes to auto, and a mouse wheel scrolls the row
+     itself (the Top 10 numerals overhang it) instead of the page. */
+  overflow-y: hidden;
   padding: 14px 56px 18px;
   scroll-snap-type: x proximity;
   scroll-padding-inline: 56px;

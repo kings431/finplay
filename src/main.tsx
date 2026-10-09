@@ -6,6 +6,8 @@ import { loadSettings } from "./settings";
 import { applyLowPower, applyTheme } from "./theme";
 import { applyCouch } from "./couch";
 import { applyPlatform } from "./components/TitleBar";
+import { setDeviceName } from "./jellyfin";
+import { deviceName } from "./player";
 import "./styles.css";
 
 const settings = loadSettings();
@@ -14,10 +16,15 @@ applyCouch(settings.couchMode);
 applyLowPower(settings.lowPower);
 applyPlatform();
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <Crash>
-      <App />
-    </Crash>
-  </StrictMode>,
-);
+// Named before the first server request, so this computer is listed by name.
+void deviceName()
+  .then(setDeviceName)
+  .finally(() =>
+    createRoot(document.getElementById("root")!).render(
+      <StrictMode>
+        <Crash>
+          <App />
+        </Crash>
+      </StrictMode>,
+    ),
+  );

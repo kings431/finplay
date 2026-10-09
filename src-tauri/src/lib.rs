@@ -1,5 +1,6 @@
 mod awake;
 mod desktop_entry;
+mod device;
 mod downloads;
 mod host_env;
 #[cfg(target_os = "macos")]
@@ -9,6 +10,7 @@ mod mpv;
 mod stats;
 mod trailer;
 
+use device::device_name;
 use downloads::{download_delete, download_dir, download_list, download_progress, download_start};
 use mpv::{player_focus, player_mini, player_play, player_request, player_stop, player_thumb, PlayerState};
 use stats::open_stats;
@@ -71,7 +73,8 @@ pub fn run() {
             download_progress,
             open_stats,
             play_trailer,
-            trailer_stream
+            trailer_stream,
+            device_name
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Finplay")

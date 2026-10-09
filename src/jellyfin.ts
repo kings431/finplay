@@ -30,7 +30,18 @@ export class ApiError extends Error {
 
 const CLIENT = "Finplay";
 const VERSION = "0.3.15";
-const DEVICE = "Desktop";
+let device = "Desktop";
+
+/** Names this computer in other apps' "Play on" lists. Header values must be
+ * plain ASCII, so curly quotes are straightened and anything else dropped. */
+export function setDeviceName(name: string) {
+  const clean = name
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^\x20-\x7e]/g, "")
+    .replace(/"/g, "")
+    .trim();
+  if (clean) device = clean;
+}
 
 export function normalizeServer(input: string) {
   const trimmed = input.trim().replace(/\/+$/, "");
@@ -42,7 +53,7 @@ export function normalizeServer(input: string) {
 
 function authHeader(deviceId: string, token?: string) {
   const tokenPart = token ? `, Token="${token}"` : "";
-  return `MediaBrowser Client="${CLIENT}", Device="${DEVICE}", DeviceId="${deviceId}", Version="${VERSION}"${tokenPart}`;
+  return `MediaBrowser Client="${CLIENT}", Device="${device}", DeviceId="${deviceId}", Version="${VERSION}"${tokenPart}`;
 }
 
 const LIST_FIELDS = "Overview,Genres,CommunityRating,OfficialRating,RunTimeTicks,ChildCount,PrimaryImageAspectRatio";

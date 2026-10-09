@@ -28,12 +28,20 @@ function center(rect: DOMRect) {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
+/** The sidebar or the page. Up and down stay inside one, so a sidebar button
+ * that happens to sit a little lower never wins over the next row of cards. */
+function region(element: Element) {
+  return element.closest(".sidebar, .main");
+}
+
 function pick(from: Element, direction: Direction) {
   const origin = from.getBoundingClientRect();
   const at = center(origin);
+  const within = direction === "up" || direction === "down" ? region(from) : null;
   let best: { element: HTMLElement; score: number } | null = null;
   for (const element of scope().querySelectorAll<HTMLElement>(FOCUSABLE)) {
     if (element === from || !visible(element)) continue;
+    if (within && !within.contains(element)) continue;
     const rect = element.getBoundingClientRect();
     const to = center(rect);
     let primary: number;
@@ -62,16 +70,30 @@ function pick(from: Element, direction: Direction) {
   return best?.element ?? null;
 }
 
+/** One smooth scroll per container: two at once on the page cancel each other
+ * and focus ends up off screen. */
 function focus(element: HTMLElement) {
   element.focus({ preventScroll: true });
-  element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
   const main = document.querySelector(".main");
-  if (main?.contains(element)) {
-    const rect = element.getBoundingClientRect();
-    const view = main.getBoundingClientRect();
-    if (rect.top < view.top + 80) main.scrollBy({ top: rect.top - view.top - 120, behavior: "smooth" });
-    else if (rect.bottom > view.bottom - 40) main.scrollBy({ top: rect.bottom - view.bottom + 120, behavior: "smooth" });
+  if (!main?.contains(element)) {
+    element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return;
   }
+  const rect = element.getBoundingClientRect();
+  const track = element.closest(".row-track");
+  if (track) {
+    const lane = track.getBoundingClientRect();
+    const edge = 56;
+    if (rect.left < lane.left + edge) track.scrollBy({ left: rect.left - lane.left - edge, behavior: "smooth" });
+    else if (rect.right > lane.right - edge) track.scrollBy({ left: rect.right - lane.right + edge, behavior: "smooth" });
+  }
+  const view = main.getBoundingClientRect();
+  let top: number | null = null;
+  // Nothing above it: show the page from the very top, hero included.
+  if (!pick(element, "up")) top = 0;
+  else if (rect.top < view.top + 80) top = main.scrollTop + rect.top - view.top - 120;
+  else if (rect.bottom > view.bottom - 40) top = main.scrollTop + rect.bottom - view.bottom + 120;
+  if (top !== null) main.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
 }
 
 function first() {
@@ -85,6 +107,9 @@ export function move(direction: Direction) {
   const inScope = current instanceof HTMLElement && current !== document.body && scope().contains(current) && visible(current);
   const next = inScope ? pick(current, direction) : first();
   if (next) focus(next);
+  else if (inScope && direction === "up" && region(current)?.matches(".main")) {
+    document.querySelector(".main")?.scrollTo({ top: 0, behavior: "smooth" });
+  }
 }
 
 function back() {

@@ -663,6 +663,12 @@ fn start_player(
         format!("--start={}", request.start_seconds.max(0.0)),
         "--user-agent=Finplay/0.1.0".into(),
     ];
+    // Overwritten each time, so a failed playback can be diagnosed afterwards.
+    if let Ok(dir) = app.path().app_log_dir() {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            args.push(format!("--log-file={}", dir.join("mpv.log").display()));
+        }
+    }
     if request.low_power {
         // mpv's "fast" profile, spelled out because older mpv builds lack it.
         for option in [

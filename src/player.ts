@@ -39,6 +39,13 @@ export function inTauri() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** This computer's name, or "" outside the desktop app. */
+export async function deviceName() {
+  if (!inTauri()) return "";
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("device_name").catch(() => "");
+}
+
 export async function playerPlay(request: PlayRequest) {
   if (!inTauri()) {
     throw new Error("Playback runs in the Finplay desktop app, which uses mpv. A browser tab cannot direct-play these files.");
