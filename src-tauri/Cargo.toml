@@ -1,6 +1,6 @@
 [package]
 name = "finplay"
-version = "0.3.24"
+version = "0.3.25"
 description = "Finplay — a Jellyfin desktop client that direct-plays with mpv"
 authors = []
 edition = "2021"
