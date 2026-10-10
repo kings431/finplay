@@ -6,6 +6,8 @@ import { useSession } from "../session";
 import { normalizeStatsUrl, openStats } from "../stats";
 import { applyLowPower, applyTheme } from "../theme";
 import { applyCouch } from "../couch";
+import { setCrashReporting } from "../crash";
+import { inTauri } from "../player";
 import { appVersion, findUpdate, installUpdate, type Update } from "../updates";
 import type { HeroSource, Settings, Theme } from "../types";
 
@@ -300,6 +302,22 @@ export function Settings() {
             aria-pressed={settings.lowPower}
           />
         </div>
+        {inTauri() ? (
+          <div className="setting-row">
+            <div>
+              <strong>Send crash reports</strong>
+              <p>When Finplay crashes or a video fails to play, the error is sent to the developer. Server addresses, tokens and your name are removed first.</p>
+            </div>
+            <button
+              className={`switch${settings.crashReports ? " on" : ""}`}
+              onClick={() => {
+                update({ crashReports: !settings.crashReports });
+                setCrashReporting(!settings.crashReports);
+              }}
+              aria-pressed={settings.crashReports}
+            />
+          </div>
+        ) : null}
       </section>
       <section>
         <h2>Home</h2>

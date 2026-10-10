@@ -1,4 +1,6 @@
 import type { PlayerEvent } from "./types";
+import { webListenNext, webListenPlayer, webPlay, webRequest, webStop } from "./webplayer";
+import { tv } from "./tv";
 
 export type PlayRequest = {
   url: string;
@@ -28,9 +30,12 @@ export type PlayRequest = {
   artUrl: string;
   /** A remote trailer streamed through yt-dlp. */
   trailer?: boolean;
+  /** Subtitle files for the browser player; mpv reads the ones inside the stream. */
+  subtitles?: { url: string; label: string; lang?: string; selected: boolean }[];
 };
 
 export async function listenNext(handler: () => void) {
+  if (!inTauri()) return webListenNext(handler);
   const { listen } = await import("@tauri-apps/api/event");
   return listen("player-next", () => handler());
 }
@@ -41,26 +46,26 @@ export function inTauri() {
 
 /** This computer's name, or "" outside the desktop app. */
 export async function deviceName() {
+  if (tv) return "Samsung TV";
   if (!inTauri()) return "";
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<string>("device_name").catch(() => "");
 }
 
 export async function playerPlay(request: PlayRequest) {
-  if (!inTauri()) {
-    throw new Error("Playback runs in the Finplay desktop app, which uses mpv. A browser tab cannot direct-play these files.");
-  }
+  if (!inTauri()) return webPlay(request);
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("player_play", { request });
 }
 
 export async function playerRequest(command: unknown[]) {
+  if (!inTauri()) return webRequest(command);
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<unknown>("player_request", { command });
 }
 
 export async function playerStop() {
-  if (!inTauri()) return;
+  if (!inTauri()) return webStop();
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("player_stop");
 }
@@ -91,6 +96,7 @@ export async function listenMiniToggle(handler: () => void) {
 }
 
 export async function listenThumbRequests(handler: (request: { time: number; width: number }) => void) {
+  if (!inTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<{ time: number; width: number }>("player-thumb", (event) => handler(event.payload));
 }
@@ -101,6 +107,7 @@ export async function sendThumb(pixels: Uint8Array, width: number, height: numbe
 }
 
 export async function listenPlayer(handler: (event: PlayerEvent) => void) {
+  if (!inTauri()) return webListenPlayer(handler);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<PlayerEvent>("player", (event) => handler(event.payload));
 }

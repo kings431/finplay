@@ -4,6 +4,7 @@ import { IconClose, Mark } from "../icons";
 import { Jellyfin, normalizeServer } from "../jellyfin";
 import { userImageUrl } from "../media";
 import { useSession, type StoredAuth } from "../session";
+import { tv } from "../tv";
 
 type PublicUser = Awaited<ReturnType<typeof Jellyfin.publicUsers>>[number];
 
@@ -233,7 +234,11 @@ function SignIn({ onBack }: { onBack?: () => void }) {
             </button>
           </div>
         )}
-        <p className="fine">Video opens in mpv, so HEVC, AV1, DTS, TrueHD, and PGS subtitles do not have to be transcoded the way they are in Firefox.</p>
+        {tv ? (
+          <p className="fine">Video plays on the TV's own decoders, so HEVC and Dolby audio play as stored.</p>
+        ) : (
+          <p className="fine">Video opens in mpv, so HEVC, AV1, DTS, TrueHD, and PGS subtitles do not have to be transcoded the way they are in Firefox.</p>
+        )}
       </form>
     </div>
   );

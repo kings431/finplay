@@ -195,6 +195,27 @@ export function streamBadge(source: MediaSource) {
     .join(" · ");
 }
 
+/** Subtitles the server delivers as separate WebVTT files, for the browser player.
+ * The preferred language is shown when subtitles are on. */
+export function subtitleFiles(auth: Auth, source: MediaSource, language: string, enabled: boolean) {
+  const streams = (source.MediaStreams ?? []).filter((stream) => stream.Type === "Subtitle" && stream.DeliveryMethod === "External" && stream.DeliveryUrl);
+  const preferred = enabled
+    ? streams.find((stream) => language && stream.Language === language) ?? streams.find((stream) => stream.IsDefault) ?? streams[0]
+    : undefined;
+  return streams.map((stream) => {
+    const path = stream.DeliveryUrl!;
+    const url = new URL(path.startsWith("http") ? path : `${auth.server}${path.startsWith("/") ? "" : "/"}${path}`);
+    url.searchParams.delete("api_key");
+    url.searchParams.set("ApiKey", auth.token);
+    return {
+      url: url.toString(),
+      label: stream.DisplayTitle || stream.Title || stream.Language || `Subtitle ${stream.Index}`,
+      lang: stream.Language,
+      selected: stream === preferred,
+    };
+  });
+}
+
 export function mediaUrl(auth: Auth, itemId: string, source: MediaSource, playSessionId: string, mediaType?: string) {
   if (source.SupportsDirectPlay) {
     const container = (source.Container || "mkv").split(",")[0];

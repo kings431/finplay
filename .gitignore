@@ -1,5 +1,8 @@
 node_modules
 dist
+dist-tv
+dist-tv-loader
+dist-tv-packages
 .DS_Store
 src-tauri/target
 src-tauri/gen

@@ -1,4 +1,5 @@
 mod awake;
+mod crash;
 mod desktop_entry;
 mod device;
 mod downloads;
@@ -23,6 +24,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            if let Ok(dir) = app.path().app_log_dir() {
+                crash::install(dir);
+            }
             std::thread::spawn(desktop_entry::install);
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
@@ -74,7 +78,9 @@ pub fn run() {
             open_stats,
             play_trailer,
             trailer_stream,
-            device_name
+            device_name,
+            crash::crash_report,
+            crash::crash_reporting
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Finplay")

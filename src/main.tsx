@@ -8,11 +8,15 @@ import { applyCouch } from "./couch";
 import { applyPlatform } from "./components/TitleBar";
 import { setDeviceName } from "./jellyfin";
 import { deviceName } from "./player";
+import { installTv, tv } from "./tv";
+import { installCrashReporting } from "./crash";
 import "./styles.css";
 
+installTv();
+installCrashReporting();
 const settings = loadSettings();
 applyTheme(settings.theme);
-applyCouch(settings.couchMode);
+applyCouch(tv || settings.couchMode);
 applyLowPower(settings.lowPower);
 applyPlatform();
 

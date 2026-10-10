@@ -1,4 +1,5 @@
-import { Component, type ReactNode } from "react";
+import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reportCrash } from "../crash";
 
 type State = { error: Error | null };
 
@@ -10,8 +11,9 @@ export class Crash extends Component<{ children: ReactNode }, State> {
     return { error };
   }
 
-  componentDidCatch(error: Error) {
+  componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("Finplay crashed", error);
+    reportCrash("Crash screen", error, (info.componentStack ?? "").trim().split("\n").slice(0, 6).join(" ← "));
   }
 
   render() {

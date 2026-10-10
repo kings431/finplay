@@ -719,8 +719,9 @@ button.nav-btn { border: 0; background: none; }
 
 [data-couch] { font-size: 17px; }
 [data-couch] :focus { outline: none; }
-[data-couch] :is(button, a, input, select, [tabindex]):focus { outline: 3px solid var(--fg); outline-offset: 3px; border-radius: 12px; }
-[data-couch] :is(.poster, .wide, .rank-card, .channel-card, .person, .library-card, .profile-tile):focus { outline: none; }
+/* Written out instead of :is(), which the TV's Chromium 85 drops the whole rule over. */
+[data-couch] button:focus, [data-couch] a:focus, [data-couch] input:focus, [data-couch] select:focus, [data-couch] [tabindex]:focus { outline: 3px solid var(--fg); outline-offset: 3px; border-radius: 12px; }
+[data-couch] .poster:focus, [data-couch] .wide:focus, [data-couch] .rank-card:focus, [data-couch] .channel-card:focus, [data-couch] .person:focus, [data-couch] .library-card:focus, [data-couch] .profile-tile:focus { outline: none; }
 [data-couch] .poster:focus .poster-art,
 [data-couch] .rank-card:focus .poster-art,
 [data-couch] .wide:focus .wide-art,
@@ -1757,3 +1758,63 @@ button.nav-btn { border: 0; background: none; }
 .connection-now i { width: 8px; height: 8px; border-radius: 99px; background: var(--faint); }
 .connection-now i.on { background: #34c759; box-shadow: 0 0 0 3px rgb(52 199 89 / 0.2); }
 .setting-row .error-text { color: var(--danger-text) !important; margin-top: 6px; }
+
+/* Browser and TV player: the video covers the app while the Playing page is open. */
+.web-player { position: fixed; inset: 0; z-index: 300; background: #000; display: none; }
+[data-web-playing] .web-player { display: block; }
+.web-player video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.web-player video::cue {
+  font-size: calc(2.6vh * var(--sub-scale, 1));
+  color: var(--sub-color, #fff);
+  background: rgb(0 0 0 / 0.55);
+}
+.web-osd {
+  position: fixed;
+  inset: 0;
+  z-index: 310;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 40px 56px;
+  color: #fff;
+}
+.web-osd::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(to bottom, rgb(0 0 0 / 0.7), transparent 22%, transparent 62%, rgb(0 0 0 / 0.8));
+}
+.web-osd::before, .web-osd-top, .web-osd-bottom { opacity: 0; transition: opacity 0.3s; }
+.web-osd.shown::before, .web-osd.shown .web-osd-top, .web-osd.shown .web-osd-bottom { opacity: 1; }
+.web-osd:not(.shown) { cursor: none; }
+.web-osd-top { display: flex; align-items: center; gap: 20px; }
+.web-osd-top h1 { margin: 0; font-size: 34px; }
+.web-osd-top p { margin: 4px 0 0; opacity: 0.8; font-size: 20px; }
+.web-osd-top .eyebrow { margin-left: auto; }
+.web-osd-skip { display: flex; justify-content: flex-end; gap: 12px; margin-top: auto; margin-bottom: 24px; }
+.web-progress { display: flex; align-items: center; gap: 16px; font-variant-numeric: tabular-nums; font-size: 18px; }
+.web-bar { flex: 1; height: 6px; border-radius: 99px; background: rgb(255 255 255 / 0.25); overflow: hidden; }
+.web-bar div { height: 100%; background: var(--accent); }
+.web-osd .transport button { color: #fff; }
+.web-osd .transport button.on { background: rgb(255 255 255 / 0.28); }
+
+/* Chromium before 88 (Samsung TVs up to 2022) has no aspect-ratio: a padding
+   spacer sets the shape and the artwork is laid over it. */
+@supports not (aspect-ratio: 1) {
+  .poster-art::before, .wide-art::before, .episode-thumb::before, .library-card span::before,
+  .channel-art::before, .live-art::before, .cal-art::before, .download-art::before { content: ""; display: block; }
+  .poster-art::before { padding-top: 150%; }
+  .wide-art::before, .episode-thumb::before, .library-card span::before, .channel-art::before, .cal-art::before, .download-art::before { padding-top: 56.25%; }
+  .live-art::before { padding-top: 43.75%; }
+  .poster-art > img, .wide-art > img, .episode-thumb > img, .library-card span > img, .channel-art > img, .live-art > img, .download-art > img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .person-portrait { height: 200px; }
+  .request-poster { height: 84px; }
+  .remote-art { height: 54px; }
+}

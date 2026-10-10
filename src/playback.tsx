@@ -17,8 +17,11 @@ import {
   playbackTitle,
   secondsToTicks,
   streamBadge,
+  subtitleFiles,
   ticksToSeconds,
 } from "./media";
+import type { PlayRequest } from "./player";
+import { reportCrash } from "./crash";
 import type { BaseItem, MediaSegment, MediaSource, PlayMethod, PlayerEvent } from "./types";
 
 export type ActivePlayback = {
@@ -212,7 +215,6 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (!inTauri()) return;
     let cancel = false;
     let unlisten: (() => void) | undefined;
     const sendProgress = (current: ActivePlayback, isPaused: boolean) => {
@@ -246,7 +248,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         volumeRef.current.muted !== sent.muted;
       if (changed && !event.ended && !stopSent.current && event.reason !== "error") sendProgress(current, event.paused);
       if (event.reason === "error") {
-        setError(event.detail ? `mpv could not play this stream: ${event.detail}` : "mpv could not play this stream.");
+        const player = inTauri() ? "mpv" : "The player";
+        reportCrash("Playback failed", event.detail || "no detail", `${current.method} · ${current.badge} · ${current.videoCodec ?? "?"}/${current.audioCodec ?? "?"}`);
+        setError(event.detail ? `${player} could not play this stream: ${event.detail}` : `${player} could not play this stream.`);
         void playerStop().then(() => finish(true));
       } else if (event.ended && !stopSent.current) {
         stopSent.current = true;
@@ -309,7 +313,16 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       const launch = async (
         playback: ActivePlayback,
         startSeconds: number,
-        media: { url: string; downloadId?: string; trickplay: boolean; segments: string; next?: BaseItem; artUrl: string; title?: string },
+        media: {
+          url: string;
+          downloadId?: string;
+          trickplay: boolean;
+          segments: string;
+          next?: BaseItem;
+          artUrl: string;
+          title?: string;
+          subtitles?: PlayRequest["subtitles"];
+        },
       ) => {
         nextRef.current = media.next ?? null;
         stopSent.current = false;
@@ -345,6 +358,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             artist: playback.item.SeriesName ?? (playback.item.ProductionYear ? String(playback.item.ProductionYear) : ""),
             artUrl: media.artUrl,
             trailer: playback.trailer,
+            subtitles: media.subtitles,
           });
           void playerFocus();
         } catch (err) {
@@ -481,6 +495,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           method = playMethodOf(source);
         }
         const url = mediaUrl(client.auth, target.item.Id, source, info.PlaySessionId, target.item.MediaType);
+        // The HLS playlist spans the whole title; the browser player seeks into it
+        // instead of treating the transcode start as zero.
+        const offset = method === "Transcode" && inTauri();
         const badge = streamBadge(source);
         const video = source.MediaStreams?.find((stream) => stream.Type === "Video");
         const audio = source.MediaStreams?.find((stream) => stream.Type === "Audio");
@@ -490,14 +507,14 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           mediaSourceId: source.Id,
           method,
           badge,
-          baseTicks: method === "Transcode" ? startTicks : 0,
+          baseTicks: offset ? startTicks : 0,
           videoCodec: video?.Codec,
           audioCodec: audio?.Codec,
           height: video?.Height,
           returnTo: options?.returnTo,
           liveStreamId: source.LiveStreamId ?? undefined,
         };
-        const startSeconds = method === "Transcode" ? 0 : ticksToSeconds(startTicks);
+        const startSeconds = offset ? 0 : ticksToSeconds(startTicks);
         const preview = trickplaySource(target.item, source.Id, ticksToSeconds(playback.baseTicks));
         trickplayRef.current?.dispose();
         trickplayRef.current = preview ? new TrickplayRenderer(client.auth, preview) : null;
@@ -508,6 +525,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           segments: segmentsFor(segments, ticksToSeconds(playback.baseTicks)),
           next,
           artUrl: `${client.auth.server}/Items/${target.item.SeriesId ?? target.item.Id}/Images/Primary?maxHeight=400`,
+          subtitles: inTauri() ? undefined : subtitleFiles(client.auth, source, settings.subtitleLanguage, settings.subtitlesEnabled),
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : typeof err === "string" && err ? err : "Playback failed.");

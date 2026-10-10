@@ -17,6 +17,10 @@ export type MediaStream = {
   Width?: number;
   Channels?: number;
   IsDefault?: boolean;
+  IsExternal?: boolean;
+  /** "External" when the server hands this subtitle over as its own file. */
+  DeliveryMethod?: string;
+  DeliveryUrl?: string;
 };
 
 export type MediaSource = {
@@ -275,6 +279,8 @@ export type Settings = {
   heroAutoAdvance: boolean;
   /** No blur effects and cheaper video scaling, for older or low-power machines. */
   lowPower: boolean;
+  /** Crashes and player failures are sent to the developer, without account details. */
+  crashReports: boolean;
 };
 
 export type HeroSource = "resume" | "nextUp" | "picks" | "latest" | "favorites";
@@ -299,6 +305,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoSkipIntro: false,
   playbackSpeed: 1,
   streamystatsUrl: "",
+  crashReports: true,
 };
 
 export type MediaSegment = {

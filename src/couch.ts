@@ -3,6 +3,8 @@
  * move focus spatially between controls; Enter/A activates; Back/B goes back.
  */
 
+import { exitApp, tv } from "./tv";
+
 type Direction = "up" | "down" | "left" | "right";
 
 const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -20,7 +22,7 @@ function visible(element: Element) {
 }
 
 function scope(): ParentNode {
-  const menus = document.querySelectorAll(".menu-pop, .sheet-backdrop, .resume-card");
+  const menus = document.querySelectorAll(".web-osd, .menu-pop, .sheet-backdrop, .resume-card");
   return menus.length ? menus[menus.length - 1] : document;
 }
 
@@ -96,10 +98,22 @@ function focus(element: HTMLElement) {
   if (top !== null) main.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
 }
 
+const IN_MAIN = FOCUSABLE.split(", ")
+  .map((selector) => `.main ${selector}`)
+  .join(", ");
+
 function first() {
   const root = scope();
-  const candidates = [...root.querySelectorAll<HTMLElement>(root === document ? `.main ${FOCUSABLE}` : FOCUSABLE)].filter(visible);
+  const candidates = [...root.querySelectorAll<HTMLElement>(root === document ? IN_MAIN : FOCUSABLE)].filter(visible);
   return candidates[0] ?? null;
+}
+
+/** Remotes have no pointer, so a new screen starts with its first control focused. */
+export function focusFirst() {
+  const current = document.activeElement;
+  if (current instanceof HTMLElement && current !== document.body && current.isConnected && visible(current)) return;
+  const next = first();
+  if (next) focus(next);
 }
 
 export function move(direction: Direction) {
@@ -119,6 +133,7 @@ function back() {
     return;
   }
   if (window.location.hash !== "#/" && window.location.hash !== "") window.history.back();
+  else if (tv) exitApp();
 }
 
 function onKey(event: KeyboardEvent) {
@@ -170,7 +185,8 @@ function pollPads() {
   frame = 0;
   if (!enabled) return;
   const now = performance.now();
-  const pads = navigator.getGamepads?.() ?? [];
+  // A GamepadList rather than an array before Chromium 89 (Samsung TVs up to 2022).
+  const pads = Array.from(navigator.getGamepads?.() ?? []);
   for (const pad of pads) {
     if (!pad) continue;
     const button = (index: number) => pad.buttons[index]?.pressed === true;
