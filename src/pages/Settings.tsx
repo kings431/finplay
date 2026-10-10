@@ -21,7 +21,7 @@ const HERO_SOURCES: { id: HeroSource; label: string }[] = [
 
 const THEMES: { id: Theme; label: string; hint: string }[] = [
   { id: "system", label: "System", hint: "Follows your desktop's light or dark mode" },
-  { id: "dark", label: "Dark", hint: "Black with purple accents" },
+  { id: "dark", label: "Dark", hint: "Black with blue accents" },
   { id: "light", label: "Light", hint: "Bright and clean" },
   { id: "tv", label: "Apple TV", hint: "Frosted glass, big artwork" },
 ];

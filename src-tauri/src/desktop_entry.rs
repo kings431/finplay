@@ -11,11 +11,12 @@ pub fn install() {
     let icon = data.join("icons/hicolor/512x512/apps/finplay.png");
     let entry = data.join("applications/finplay.desktop");
 
-    if !icon.is_file() {
+    let png: &[u8] = include_bytes!("../icons/icon.png");
+    if std::fs::read(&icon).ok().as_deref() != Some(png) {
         if let Some(dir) = icon.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(&icon, include_bytes!("../icons/icon.png"));
+        let _ = std::fs::write(&icon, png);
     }
 
     let exec = appimage.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");

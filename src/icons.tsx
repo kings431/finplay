@@ -1,3 +1,7 @@
+import markUrl from "./assets/finplay-mark.png";
+import wordmarkUrl from "./assets/finplay-wordmark.png";
+import wordmarkLightUrl from "./assets/finplay-wordmark-light.png";
+
 type IconProps = { size?: number };
 
 function base(size = 22) {
@@ -232,9 +236,15 @@ export function IconClose({ size }: IconProps) {
 }
 
 export function Mark({ size = 36 }: { size?: number }) {
+  return <img className="mark" src={markUrl} width={size} height={size} alt="" draggable={false} />;
+}
+
+/** The "finplay" lettering; "fin" is white on dark themes and near-black on light. */
+export function Wordmark({ height = 40 }: { height?: number }) {
   return (
-    <span className="mark" style={{ width: size, height: size }}>
-      <IconPlay size={Math.round(size * 0.46)} />
+    <span className="wordmark" role="img" aria-label="Finplay">
+      <img className="wordmark-dark" src={wordmarkUrl} height={height} alt="" draggable={false} />
+      <img className="wordmark-light" src={wordmarkLightUrl} height={height} alt="" draggable={false} />
     </span>
   );
 }

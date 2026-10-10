@@ -32,7 +32,7 @@ import { Mark } from "./icons";
 function Splash() {
   return (
     <div className="splash">
-      <Mark size={52} />
+      <Mark size={72} />
     </div>
   );
 }

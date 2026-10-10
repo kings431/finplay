@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { IconClose, Mark } from "../icons";
+import { IconClose, Mark, Wordmark } from "../icons";
 import { Jellyfin, normalizeServer } from "../jellyfin";
 import { userImageUrl } from "../media";
 import { useSession, type StoredAuth } from "../session";
@@ -18,7 +18,7 @@ export function Login() {
     return (
       <div className="login">
         <div className="profiles">
-          <Mark size={44} />
+          <Mark size={56} />
           <h1>Who's watching?</h1>
           <div className="profile-grid">
             {accounts.map((account) => (
@@ -157,8 +157,10 @@ function SignIn({ onBack }: { onBack?: () => void }) {
             ‹ Profiles
           </button>
         ) : null}
-        <Mark size={48} />
-        <h1>Finplay</h1>
+        <Mark size={64} />
+        <h1 className="login-wordmark">
+          <Wordmark height={38} />
+        </h1>
         <p>Your Jellyfin library, played directly.</p>
         <label>
           Server
