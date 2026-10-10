@@ -418,6 +418,13 @@ export function Settings() {
         </div>
         <div className="setting-row">
           <div>
+            <strong>Play theme music on title pages</strong>
+            <p>Plays a show or movie's theme song quietly while you look at its page, when the server has one. It fades out when you leave or press play.</p>
+          </div>
+          <button className={`switch${settings.themeMusic ? " on" : ""}`} onClick={() => update({ themeMusic: !settings.themeMusic })} aria-pressed={settings.themeMusic} />
+        </div>
+        <div className="setting-row">
+          <div>
             <strong>Playback speed</strong>
             <p>Used when a title starts. You can still change speed in the player with [ and ].</p>
           </div>

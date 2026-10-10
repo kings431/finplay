@@ -80,6 +80,8 @@ export type BaseItem = {
   ProductionLocations?: string[];
   LocalTrailerCount?: number;
   RemoteTrailers?: { Url?: string; Name?: string }[];
+  /** Set on a title's extras: "BehindTheScenes", "DeletedScene", "Featurette" and so on. */
+  ExtraType?: string;
   Taglines?: string[];
   IndexNumber?: number;
   ParentIndexNumber?: number;
@@ -301,6 +303,8 @@ export type Settings = {
   mpvPath: string;
   autoplayNext: boolean;
   autoSkipIntro: boolean;
+  /** Plays a title's theme song quietly on its page. */
+  themeMusic: boolean;
   /** Default playback rate when a title starts. */
   playbackSpeed: number;
   streamystatsUrl: string;
@@ -337,6 +341,7 @@ export const DEFAULT_SETTINGS: Settings = {
   couchMode: false,
   autoplayNext: true,
   autoSkipIntro: false,
+  themeMusic: false,
   playbackSpeed: 1,
   streamystatsUrl: "",
   crashReports: true,

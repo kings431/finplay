@@ -56,7 +56,21 @@ export type FailedPlayback = {
   audioCodec?: string;
   /** Episode, Movie, … — never the title. */
   itemType?: string;
+  /** Times the stream was reopened before giving up. */
+  retries?: number;
 };
+
+/** The server's 5xx answer for a failed stream, e.g. "502 Bad Gateway", or "". */
+export function serverError(event: PlayerEvent) {
+  const status = event.diagnostics?.httpStatus || /\bHTTP (5\d\d)\b/.exec(event.detail)?.[1] || "";
+  return /^5\d\d\b/.test(status) ? status : "";
+}
+
+/** The stream could not be opened at all, without a status that says why. */
+export function openFailed(event: PlayerEvent) {
+  if (event.diagnostics) return event.diagnostics.fileError === "loading failed";
+  return /LoadError|LoadTimeOut|network error/i.test(event.detail);
+}
 
 const NETWORK = /\b(http|tcp|tls|ssl|connection|connect|timed? ?out|resolve|network|stream_callback)\b/i;
 
@@ -105,6 +119,7 @@ export function reportPlaybackFailure(event: PlayerEvent, playback: FailedPlayba
     info?.fileFormat ? `demuxer ${info.fileFormat}` : "",
     info ? `${info.engine}${info.handoff ? " fullscreen window" : info.embedded ? " embedded" : ""}` : "",
     info?.restart ? "stream restart" : "",
+    playback.retries ? `after ${playback.retries} ${playback.retries === 1 ? "retry" : "retries"}` : "",
     info ? `uptime ${clock(info.uptime)}` : "",
   ].filter(Boolean).join(" · ");
   // The webhook keeps the start of this text, so keep the newest lines that fit.
@@ -116,7 +131,11 @@ export function reportPlaybackFailure(event: PlayerEvent, playback: FailedPlayba
     lines.unshift(line);
   }
   const details = [`end-file reason=${info?.endReason || event.reason}${info?.fileError ? ` error="${info.fileError}"` : ""}`, ...(lines.length ? ["mpv log (warn+):", ...lines] : ["mpv log: (nothing at warn level)"])].join("\n");
-  reportCrash("Playback failed", message, context, details);
+  // A 5xx is the server's (or its tuner's) failure, not Finplay's: a separate,
+  // lower-priority kind whose title stays the same so repeats are deduplicated.
+  const server = serverError(event);
+  if (server) reportCrash("Server error", `HTTP ${server}${playback.itemType === "TvChannel" ? " (Live TV)" : ""}`, context, details);
+  else reportCrash("Playback failed", message, context, details);
 }
 
 export function setCrashReporting(enabled: boolean) {

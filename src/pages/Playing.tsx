@@ -40,7 +40,7 @@ type MenuOption = { key: string; label: string; detail?: string; selected: boole
 type TrackMenu = { kind: MenuKind; title: string; button: string; value: string; options: MenuOption[] };
 
 /** The player's choices for this title. Each needs more than one option, except
- * subtitles, which always offer Off. */
+ * subtitles, which are always listed so a title without any can say so. */
 function trackMenus(active: ActivePlayback, speed: number): TrackMenu[] {
   const menus: TrackMenu[] = [];
   const valueOf = (options: MenuOption[]) => options.find((option) => option.selected)?.label ?? "";
@@ -54,21 +54,25 @@ function trackMenus(active: ActivePlayback, speed: number): TrackMenu[] {
     }));
     if (audio.length > 1) menus.push({ kind: "audio", title: "Audio", button: "Audio", value: valueOf(audio), options: audio });
     const subs = subtitleStreams(active.streams);
-    if (subs.length) {
-      const options: MenuOption[] = [
-        { key: "s-off", label: "Off", selected: (active.subtitleIndex ?? -1) < 0, change: { subtitle: -1 } },
-        ...subs.map<MenuOption>((stream) => ({
-          key: `s${stream.Index}`,
-          label: streamLabel(stream),
-          detail: [stream.IsForced ? "Forced" : "", stream.IsExternal ? "External file" : "", isTextSubtitle(stream) ? "" : "Picture subtitles, restarts the stream"]
-            .filter(Boolean)
-            .join(" · "),
-          selected: stream.Index === active.subtitleIndex,
-          change: { subtitle: stream.Index },
-        })),
-      ];
-      menus.push({ kind: "subtitles", title: "Subtitles", button: "Subtitles", value: valueOf(options), options });
-    }
+    const subtitles: MenuOption[] = [
+      {
+        key: "s-off",
+        label: "Off",
+        detail: subs.length ? undefined : "This video has no subtitle tracks. Any text on screen is part of the picture.",
+        selected: (active.subtitleIndex ?? -1) < 0,
+        change: { subtitle: -1 },
+      },
+      ...subs.map<MenuOption>((stream) => ({
+        key: `s${stream.Index}`,
+        label: streamLabel(stream),
+        detail: [stream.IsForced ? "Forced" : "", stream.IsExternal ? "External file" : "", isTextSubtitle(stream) ? "" : "Picture subtitles, restarts the stream"]
+          .filter(Boolean)
+          .join(" · "),
+        selected: stream.Index === active.subtitleIndex,
+        change: { subtitle: stream.Index },
+      })),
+    ];
+    menus.push({ kind: "subtitles", title: "Subtitles", button: "Subtitles", value: subs.length ? valueOf(subtitles) : "None", options: subtitles });
   }
   const speeds = SPEEDS.map<MenuOption>((rate) => ({ key: `r${rate}`, label: rate === 1 ? "Normal" : `${rate}×`, selected: rate === speed, speed: rate }));
   menus.push({ kind: "speed", title: "Playback speed", button: "Speed", value: speed === 1 ? "1×" : `${speed}×`, options: speeds });

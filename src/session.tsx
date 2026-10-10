@@ -215,7 +215,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!client || status !== "ready") return;
     let cancel = false;
-    void client.capabilities().catch(() => {});
     client
       .seerrUserStatus()
       .then((status) => {

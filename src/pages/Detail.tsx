@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { IconBack, IconCheck, IconFilm, IconHeart, IconPlay } from "../icons";
 import { playRemoteTrailer, trailerStream } from "../trailer";
@@ -18,6 +18,8 @@ import {
 import { Poster, Scroller } from "../components/Cards";
 import { DownloadButton, SeasonDownload, UnwatchedDownload } from "../components/DownloadButton";
 import { AddToPlaylist } from "../components/AddToPlaylist";
+import { ExtrasRow, sortExtras } from "../components/Extras";
+import { ThemeMusic } from "../components/ThemeMusic";
 import { downloadImage, useDownloads } from "../downloads";
 import { inTauri } from "../player";
 import { usePlayback, type PlayOptions } from "../playback";
@@ -140,6 +142,16 @@ export function Detail() {
     useCached(!offline && seriesId && seasonId ? `episodes:${seriesId}:${seasonId}:${version}` : null, async () =>
       seriesId ? ((await client.episodes(seriesId, seasonId)).Items ?? []) : [],
     ).data ?? [];
+  // Tagged with whose they are: the hook hands back the last title's list until the next one loads.
+  const ownExtras = useCached(!offline && item && !collection && !item.ExtraType ? `extras:${item.Id}` : null, async () =>
+    item ? { id: item.Id, list: sortExtras(await client.specialFeatures(item.Id)) } : null,
+  ).data;
+  const extras = ownExtras && ownExtras.id === item?.Id ? ownExtras.list : [];
+  const seasonOwn = useCached(!offline && seriesId && seasonId ? `extras:${seasonId}` : null, async () => ({
+    id: seasonId,
+    list: sortExtras(await client.specialFeatures(seasonId)),
+  })).data;
+  const seasonExtras = seasonOwn && seasonOwn.id === seasonId ? seasonOwn.list : [];
 
   useEffect(() => {
     setPickedSeason("");
@@ -196,6 +208,28 @@ export function Detail() {
     }
   }
 
+  /** Extras always start at the beginning, play nothing after, and come back here. */
+  function playExtra(extra: BaseItem) {
+    if (item) void play(extra, { fromStart: true, returnTo: `/item/${item.Id}` });
+  }
+
+  /** The title's library, filtered to a genre or studio. */
+  async function openFiltered(kind: "genre" | "studio", name: string) {
+    if (!item || offline) return;
+    const libraries = new Set(session.views.map((view) => view.Id));
+    const ancestors = await client.ancestors(item.Id).catch(() => [] as BaseItem[]);
+    const library =
+      ancestors.find((ancestor) => libraries.has(ancestor.Id))?.Id ??
+      session.views.find((view) => view.CollectionType === (item.Type === "Movie" ? "movies" : "tvshows"))?.Id;
+    if (library) navigate(`/library/${library}?${new URLSearchParams({ [kind]: name })}`);
+  }
+
+  const filterLink = (kind: "genre" | "studio", name: string) => (
+    <button key={name} className="filter-link" disabled={offline} onClick={() => void openFiltered(kind, name)} title={`More ${kind === "genre" ? name : `from ${name}`}`}>
+      {name}
+    </button>
+  );
+
   async function markPlayed(target: BaseItem, next: boolean, event?: MouseEvent) {
     event?.stopPropagation();
     if (offline) return;
@@ -227,7 +261,7 @@ export function Detail() {
     item.Type !== "Series" && !collection ? formatRuntime(item.RunTimeTicks) : "",
     item.Type !== "Series" && !collection && item.RunTimeTicks ? endsAt(item, canResume) : "",
   ].filter(Boolean);
-  const facts = factsOf(item, source);
+  const facts = factsOf(item, source, (name) => filterLink("studio", name));
 
   return (
     <article className="detail">
@@ -258,8 +292,17 @@ export function Detail() {
             {pills}
             {meta.length ? <span className="hero-meta">{meta.join("  ·  ")}</span> : null}
           </div>
-          {item.Genres?.length ? <p className="hero-genres">{item.Genres.slice(0, 4).join("  ·  ")}</p> : null}
-          <div className="hero-actions">
+          {item.Genres?.length ? (
+            <p className="hero-genres">
+              {item.Genres.slice(0, 4).map((genre, index) => (
+                <span key={genre}>
+                  {index ? <i aria-hidden>·</i> : null}
+                  {filterLink("genre", genre)}
+                </span>
+              ))}
+            </p>
+          ) : null}
+          <div className="hero-actions" data-down=".version select, .facts .filter-link">
             {collection ? (
               firstChild ? (
                 <button className="btn-play" disabled={busy} onClick={() => void play(firstChild, { resume: true })}>
@@ -307,6 +350,7 @@ export function Detail() {
                 {item.Type === "Movie" || item.Type === "Episode" || item.Type === "Series" || item.Type === "Season" ? <AddToPlaylist item={item} /> : null}
                 {inTauri() && (item.Type === "Movie" || item.Type === "Episode") ? <DownloadButton item={item} mediaSourceId={sourceId || undefined} /> : null}
                 <TrailerButton item={item} />
+                <ThemeMusic itemId={item.Id} />
               </>
             ) : null}
           </div>
@@ -413,6 +457,9 @@ export function Detail() {
           </div>
         </section>
       ) : null}
+
+      {season && seasonExtras.length > 0 ? <ExtrasRow title={`${season.Name} extras`} extras={seasonExtras} onPlay={playExtra} /> : null}
+      <ExtrasRow title="Extras" extras={extras} onPlay={playExtra} />
 
       {children.length > 0 ? (
         <section className="detail-section">
@@ -598,7 +645,7 @@ function endsAt(item: BaseItem, resume: boolean) {
   return `Ends at ${end.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 }
 
-function factsOf(item: BaseItem, source?: MediaSource): [string, string][] {
+function factsOf(item: BaseItem, source: MediaSource | undefined, studioLink: (name: string) => ReactNode): [string, ReactNode][] {
   const people = (kind: string) =>
     (item.People ?? [])
       .filter((person) => person.Type === kind)
@@ -606,9 +653,19 @@ function factsOf(item: BaseItem, source?: MediaSource): [string, string][] {
       .filter(Boolean)
       .slice(0, 3)
       .join(", ");
-  const facts: [string, string][] = [];
-  const studios = (item.Studios ?? []).map((studio) => studio.Name).filter(Boolean).slice(0, 3).join(", ");
-  if (studios) facts.push([item.Type === "Series" ? "Network" : "Studio", studios]);
+  const facts: [string, ReactNode][] = [];
+  const studios = (item.Studios ?? []).map((studio) => studio.Name).filter((name): name is string => Boolean(name)).slice(0, 3);
+  if (studios.length) {
+    facts.push([
+      item.Type === "Series" ? "Network" : "Studio",
+      studios.map((name, index) => (
+        <span key={name}>
+          {index ? ", " : ""}
+          {studioLink(name)}
+        </span>
+      )),
+    ]);
+  }
   if (item.Type === "Series" && item.Status) facts.push(["Status", item.Status === "Continuing" ? "Returning series" : item.Status]);
   const directors = people("Director");
   if (directors) facts.push(["Director", directors]);

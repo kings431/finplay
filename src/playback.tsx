@@ -4,7 +4,7 @@ import { Jellyfin } from "./jellyfin";
 import { useSession } from "./session";
 import { loadSettings } from "./settings";
 import { invalidate, markStale } from "./cache";
-import { listenMiniExit, listenMiniToggle, listenNext, listenPlayer, listenThumbRequests, playerFocus, playerMini, playerPlay, playerRequest, playerStop, inTauri } from "./player";
+import { listenMiniExit, listenMiniToggle, listenNext, listenPlayer, listenThumbRequests, playerFocus, playerMini, playerPlay, playerRequest, playerSetNext, playerStop, inTauri } from "./player";
 import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
 import { nextDownloaded, useDownloads, type DownloadEntry } from "./downloads";
@@ -28,7 +28,7 @@ import {
 } from "./media";
 import type { PlayRequest } from "./player";
 import { webAudioTrack, webSubtitle } from "./webplayer";
-import { reportPlaybackFailure, type PlaybackAction } from "./crash";
+import { openFailed, reportPlaybackFailure, serverError, type PlaybackAction } from "./crash";
 import type { BaseItem, MediaSegment, MediaSource, MediaStream, PlayMethod, PlayerEvent, PlaybackInfo } from "./types";
 
 export type ActivePlayback = {
@@ -80,6 +80,12 @@ type PlaybackContextValue = {
   /** Browser player: switches audio, subtitles, quality or version, restarting
    * the stream at the same spot when it can't be done in place. */
   changeStreams: (change: StreamChange) => Promise<void>;
+  /** Adds titles straight after the current one, or at the end of the queue. */
+  enqueue: (items: BaseItem[], at: "next" | "last") => void;
+  /** Moves to the next title in the queue; false when there is none. */
+  next: () => Promise<boolean>;
+  /** The previous title in the queue, or the start of this one. */
+  previous: () => Promise<void>;
 };
 
 export type RemoteSend = (item: BaseItem, startTicks: number, mediaSourceId?: string) => Promise<void>;
@@ -98,7 +104,16 @@ export type PlayOptions = {
   local?: boolean;
   /** What plays after this, in order, instead of the next episode (a playlist). */
   queue?: BaseItem[];
+  /** What already played from the same queue, for Previous and remote controls. */
+  history?: BaseItem[];
+  /** Jellyfin stream indexes to start with; subtitles -1 is off. */
+  audioIndex?: number;
+  subtitleIndex?: number;
 };
+
+export function nextTitleOf(item: BaseItem | null | undefined) {
+  return item ? [episodeCode(item), item.Name].filter(Boolean).join(" · ") : "";
+}
 
 type ResumeAsk = { item: BaseItem; seconds: number; resolve: (choice: "resume" | "start" | null) => void };
 
@@ -119,6 +134,15 @@ function segmentsFor(segments: MediaSegment[], offsetSeconds: number) {
     .filter((segment) => segment.end > segment.start + 1 && /^[A-Za-z]+$/.test(segment.type))
     .map((segment) => `${segment.type}:${segment.start.toFixed(2)}:${segment.end.toFixed(2)}`)
     .join(";");
+}
+
+/** Waits before each reopen of a Live TV channel that failed to start. */
+const LIVE_RETRY_DELAYS = [2000, 4000];
+
+/** The stream failed while opening rather than after it had played. */
+function failedAtStart(event: PlayerEvent) {
+  const info = event.diagnostics;
+  return info ? info.sinceLoad < 30 && info.position < 5 : event.time < 5;
 }
 
 function sourceOf(sources: MediaSource[], preferred?: string) {
@@ -159,6 +183,15 @@ function textSubtitle(client: Jellyfin, itemId: string, source: MediaSource, ind
   return stream && !burn ? subtitleFile(client.auth, itemId, source.Id, stream) : undefined;
 }
 
+/** `choice` with the stream indexes a caller asked for, where the source has them. */
+function withAsked(choice: StreamChoice, source: MediaSource, asked?: { audioIndex?: number; subtitleIndex?: number }): StreamChoice {
+  const has = (type: string, index?: number) => index !== undefined && (source.MediaStreams ?? []).some((stream) => stream.Type === type && stream.Index === index);
+  return {
+    audio: has("Audio", asked?.audioIndex) ? (asked?.audioIndex as number) : choice.audio,
+    subtitle: asked?.subtitleIndex === -1 || has("Subtitle", asked?.subtitleIndex) ? (asked?.subtitleIndex as number) : choice.subtitle,
+  };
+}
+
 function streamsOf(source: MediaSource, choice: StreamChoice, burn: boolean, maxBitrate: number) {
   const audio = audioStreams(source.MediaStreams).find((stream) => stream.Index === choice.audio);
   return { streams: source.MediaStreams ?? [], audioIndex: choice.audio, subtitleIndex: choice.subtitle, burnIn: burn, maxBitrate, ...(audio ? { audioCodec: audio.Codec } : {}) };
@@ -196,11 +229,22 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const sentRef = useRef({ paused: false, position: 0, at: 0, volume: 100, muted: false });
   const nextRef = useRef<BaseItem | null>(null);
   const queueRef = useRef<BaseItem[] | undefined>(undefined);
+  /** `nextRef` came from the queue rather than the series' next episode. */
+  const nextQueuedRef = useRef(false);
+  const historyRef = useRef<BaseItem[]>([]);
+  /** Playing from a queue, which remote controls are shown in full. */
+  const listedRef = useRef(false);
+  /** The player was told what comes next and asks for it itself at the end. */
+  const playerAdvancesRef = useRef(false);
+  const startedRef = useRef(false);
+  const advanceRef = useRef<() => boolean>(() => false);
   /** What the player was last asked to play, replayed when a stream restarts. */
   const requestRef = useRef<PlayRequest | null>(null);
   const actionRef = useRef<PlaybackAction>({ kind: "start", at: 0 });
   /** The play session a failure was already handled for. */
   const failedRef = useRef("");
+  /** Times the current Live TV channel was reopened after failing to start. */
+  const liveRetryRef = useRef({ itemId: "", attempts: 0 });
   const playRef = useRef<(item: BaseItem, options?: PlayOptions) => Promise<void>>(async () => {});
   const [resumeAsk, setResumeAsk] = useState<ResumeAsk | null>(null);
   navigateRef.current = navigate;
@@ -211,6 +255,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       if (!client) return false;
       const ticks = playback.baseTicks + secondsToTicks(Math.max(0, seconds));
       const { volume, muted, rate } = volumeRef.current;
+      const listed = listedRef.current;
+      const entries = listed
+        ? [...historyRef.current, playback.item, ...(nextQueuedRef.current && nextRef.current ? [nextRef.current] : []), ...(queueRef.current ?? [])]
+        : [playback.item];
+      const at = listed ? historyRef.current.length : 0;
+      const tracks = playback.streams || event === "stop" || playback.method === "Transcode" ? null : await mpvStreams();
       try {
         await client.report(event, {
           ItemId: playback.item.Id,
@@ -224,12 +274,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           VolumeLevel: Math.round(Math.min(100, Math.max(0, muted ? 0 : volume))),
           PlaybackRate: rate,
           PlayMethod: playback.method,
-          AudioStreamIndex: playback.audioIndex,
-          SubtitleStreamIndex: playback.subtitleIndex,
+          AudioStreamIndex: playback.audioIndex ?? tracks?.audio,
+          SubtitleStreamIndex: playback.subtitleIndex ?? tracks?.subtitle,
           RepeatMode: "RepeatNone",
           PlaybackOrder: "Default",
-          PlaylistItemId: "playlistItem0",
-          NowPlayingQueue: [{ Id: playback.item.Id, PlaylistItemId: "playlistItem0" }],
+          PlaylistItemId: `playlistItem${at}`,
+          NowPlayingQueue: entries.map((entry, index) => ({ Id: entry.Id, PlaylistItemId: `playlistItem${index}` })),
           BufferedRanges: [],
         });
         return true;
@@ -283,10 +333,27 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     [report],
   );
 
+  advanceRef.current = () => {
+    const next = nextRef.current;
+    const current = activeRef.current;
+    if (!next || !current) return false;
+    const listed = listedRef.current;
+    const queue = queueRef.current;
+    actionRef.current = { kind: "auto-next", at: Date.now() };
+    const options: PlayOptions = { resume: true, local: true, queue: listed ? queue ?? [] : queue, history: listed ? [...historyRef.current, current.item] : undefined };
+    // The stop report goes out with the queue as it was, then a second Next has nothing to take.
+    const finished = finish(false);
+    nextRef.current = null;
+    void finished.then(() => playRef.current(next, options));
+    return true;
+  };
+
   useEffect(() => {
     let cancel = false;
     let unlisten: (() => void) | undefined;
     const sendProgress = (current: ActivePlayback, isPaused: boolean) => {
+      // The player talks before it has started; the start report comes first.
+      if (!startedRef.current) return;
       const { volume, muted } = volumeRef.current;
       sentRef.current = { paused: isPaused, position: positionRef.current, at: Date.now(), volume, muted };
       void report(current, "progress", positionRef.current, isPaused);
@@ -316,32 +383,61 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         volumeRef.current.volume !== sent.volume ||
         volumeRef.current.muted !== sent.muted;
       if (changed && !event.ended && !stopSent.current && event.reason !== "error") sendProgress(current, event.paused);
+      if (liveRetryRef.current.attempts && event.reason !== "error" && event.time > 5) liveRetryRef.current = { itemId: "", attempts: 0 };
       if (event.reason === "error") {
         // mpv repeats the failed state until it is stopped; handle it once.
         if (failedRef.current === current.playSessionId) return;
         failedRef.current = current.playSessionId;
+        const live = current.item.Type === "TvChannel" && !current.trailer && !current.local;
+        const server = serverError(event);
+        const code = server.slice(0, 3);
+        const unavailable = live && (Boolean(server) || openFailed(event));
+        const retries = liveRetryRef.current.itemId === current.item.Id ? liveRetryRef.current.attempts : 0;
+        if (unavailable && failedAtStart(event) && retries < LIVE_RETRY_DELAYS.length) {
+          // Tuners and IPTV upstreams often fail the first open. Close the
+          // server's live stream so the next PlaybackInfo tunes it again.
+          liveRetryRef.current = { itemId: current.item.Id, attempts: retries + 1 };
+          stopSent.current = true;
+          void report(current, "stop", 0, false);
+          setError(`The channel didn't start${code ? ` (HTTP ${code})` : ""}. Trying again…`);
+          void playerStop()
+            .then(() => new Promise((resolve) => window.setTimeout(resolve, LIVE_RETRY_DELAYS[retries])))
+            .then(async () => {
+              // Stopped, or something else started, while waiting.
+              if (activeRef.current !== current) return;
+              await playRef.current(current.item, { fromStart: true, local: true, returnTo: current.returnTo });
+              if (activeRef.current === current) await finish(true);
+            });
+          return;
+        }
+        liveRetryRef.current = { itemId: "", attempts: 0 };
         const player = inTauri() ? "mpv" : "The player";
-        reportPlaybackFailure(event, { ...current, itemType: current.item.Type }, actionRef.current);
-        setError(event.detail ? `${player} could not play this stream: ${event.detail}` : `${player} could not play this stream.`);
+        reportPlaybackFailure(event, { ...current, itemType: current.item.Type, retries }, actionRef.current);
+        setError(
+          unavailable
+            ? `This channel isn't available right now — the server couldn't open it${code ? ` (HTTP ${code})` : ""}. Try again or pick another channel.`
+            : server
+              ? `The server couldn't stream this right now (HTTP ${code}). Try again in a moment.`
+              : event.detail
+                ? `${player} could not play this stream: ${event.detail}`
+                : `${player} could not play this stream.`,
+        );
         void playerStop().then(() => finish(true));
       } else if (event.ended && !stopSent.current) {
         stopSent.current = true;
         setFinished(true);
         void report(current, "stop", event.duration || event.time || positionRef.current, false);
+        // mpv only counts down to titles it was told about when it started.
+        const advanced = inTauri() && !playerAdvancesRef.current && advanceRef.current();
+        // mpv keeps a finished file open; an extra goes straight back to its title.
+        if (inTauri() && !advanced && !nextRef.current && current.item.ExtraType) void playerStop().then(() => finish(true));
       }
     }).then((stopListening) => {
       if (cancel) stopListening();
       else unlisten = stopListening;
     });
     let unlistenNext: (() => void) | undefined;
-    listenNext(() => {
-      const next = nextRef.current;
-      if (!next || !activeRef.current) return;
-      nextRef.current = null;
-      const queue = queueRef.current;
-      actionRef.current = { kind: "auto-next", at: Date.now() };
-      void finish(false).then(() => playRef.current(next, { resume: true, queue }));
-    }).then((stopListening) => {
+    listenNext(() => void advanceRef.current()).then((stopListening) => {
       if (cancel) stopListening();
       else unlistenNext = stopListening;
     });
@@ -398,8 +494,19 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           subtitles?: PlayRequest["subtitles"];
         },
       ) => {
+        const previous = activeRef.current;
+        // Started over the top of something else, as remote controls can.
+        if (previous && !stopSent.current) {
+          stopSent.current = true;
+          void report(previous, "stop", positionRef.current, false);
+        }
         nextRef.current = media.next ?? null;
         queueRef.current = options?.queue?.slice(1);
+        nextQueuedRef.current = Boolean(options?.queue?.length);
+        historyRef.current = options?.history ?? [];
+        listedRef.current = options?.queue !== undefined || historyRef.current.length > 0;
+        playerAdvancesRef.current = Boolean(media.next);
+        startedRef.current = false;
         stopSent.current = false;
         if (actionRef.current.kind !== "auto-next" || Date.now() - actionRef.current.at > 30_000) actionRef.current = { kind: "start", at: Date.now() };
         positionRef.current = startSeconds;
@@ -428,7 +535,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             badge: playback.badge,
             trickplay: media.trickplay,
             segments: media.segments,
-            nextTitle: media.next ? [episodeCode(media.next), media.next.Name].filter(Boolean).join(" · ") : "",
+            nextTitle: nextTitleOf(media.next),
             autoSkip: settings.autoSkipIntro,
             lowPower: settings.lowPower,
             artist: playback.item.SeriesName ?? (playback.item.ProductionYear ? String(playback.item.ProductionYear) : ""),
@@ -450,6 +557,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         pausedRef.current = false;
         sentRef.current = { ...volumeRef.current, paused: false, position: startSeconds, at: Date.now() };
         void report(playback, "start", startSeconds, false);
+        startedRef.current = true;
         if (!miniRef.current) navigate(`/playing/${playback.item.Id}`);
       };
 
@@ -553,23 +661,25 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           client.segments(target.item.Id),
           queued ? Promise.resolve(queued) : settings.autoplayNext ? client.nextEpisode(target.item).catch(() => undefined) : Promise.resolve(undefined),
         ]);
+        const askedSubtitle = options?.subtitleIndex ?? (settings.subtitlesEnabled ? undefined : -1);
         let info = await client.playbackInfo(target.item.Id, {
           startTicks: 0,
           mediaSourceId: options?.mediaSourceId,
-          subtitleIndex: settings.subtitlesEnabled ? undefined : -1,
+          audioIndex: options?.audioIndex,
+          subtitleIndex: askedSubtitle,
           maxBitrate: settings.maxBitrate,
         });
         let source = sourceOf(info.MediaSources ?? [], options?.mediaSourceId);
         if (!source) throw new Error("Jellyfin did not return a media source.");
         // The browser player picks its own tracks; mpv reads the language settings itself.
-        const choice = inTauri() ? null : initialStreams(source, settings);
+        const choice = inTauri() ? null : withAsked(initialStreams(source, settings), source, options);
         let method = playMethodOf(source);
         if (method === "Transcode" && startTicks > 0) {
           info = await client.playbackInfo(target.item.Id, {
             startTicks,
             mediaSourceId: source.Id,
-            audioIndex: choice?.audio,
-            subtitleIndex: choice ? choice.subtitle : settings.subtitlesEnabled ? undefined : -1,
+            audioIndex: choice ? choice.audio : options?.audioIndex,
+            subtitleIndex: choice ? choice.subtitle : askedSubtitle,
             maxBitrate: settings.maxBitrate,
           });
           source = sourceOf(info.MediaSources ?? [], source.Id);
@@ -732,6 +842,41 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     await playerRequest(["set_property", "pause", next]);
   }, []);
 
+  const enqueue = useCallback(
+    (items: BaseItem[], at: "next" | "last") => {
+      const current = activeRef.current;
+      if (!current || current.trailer || items.length === 0) return;
+      // A next episode the app picked itself gives way to what was asked for.
+      const queued = [...(nextQueuedRef.current && nextRef.current ? [nextRef.current] : []), ...(queueRef.current ?? [])];
+      const upcoming = at === "next" ? [...items, ...queued] : [...queued, ...items];
+      nextRef.current = upcoming[0];
+      queueRef.current = upcoming.slice(1);
+      nextQueuedRef.current = true;
+      listedRef.current = true;
+      const title = nextTitleOf(upcoming[0]);
+      if (requestRef.current) requestRef.current = { ...requestRef.current, nextTitle: title };
+      playerSetNext(title);
+      void report(current, "progress", positionRef.current, pausedRef.current);
+    },
+    [report],
+  );
+
+  const next = useCallback(async () => advanceRef.current(), []);
+
+  const previous = useCallback(async () => {
+    const current = activeRef.current;
+    const earlier = historyRef.current;
+    if (!current) return;
+    if (earlier.length === 0 || positionRef.current > 10) {
+      await seek(0);
+      return;
+    }
+    const upcoming = [...(nextQueuedRef.current && nextRef.current ? [nextRef.current] : []), ...(queueRef.current ?? [])];
+    actionRef.current = { kind: "start", at: Date.now() };
+    await finish(false);
+    await playRef.current(earlier[earlier.length - 1], { startAt: 0, local: true, queue: [current.item, ...upcoming], history: earlier.slice(0, -1) });
+  }, [finish, seek]);
+
   // Embedded mpv often leaves keyboard focus on the webview. Drive playback
   // through IPC for the whole session so Space/arrows work in and out of fullscreen.
   useEffect(() => {
@@ -870,8 +1015,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       mini,
       setMini,
       changeStreams,
+      enqueue,
+      next,
+      previous,
     }),
-    [active, busy, error, play, stop, togglePause, seek, pauseTo, mini, setMini, changeStreams],
+    [active, busy, error, play, stop, togglePause, seek, pauseTo, mini, setMini, changeStreams, enqueue, next, previous],
   );
   const clock = useMemo<PlaybackClock>(() => ({ position, duration, paused, finished }), [position, duration, paused, finished]);
 
@@ -947,6 +1095,24 @@ async function resolveTarget(client: Jellyfin, item: BaseItem, fromStart: boolea
   const full = item.MediaSources ? item : await client.item(item.Id);
   const ticks = fromStart || (full.UserData?.PlayedPercentage ?? 0) > 97 ? 0 : full.UserData?.PlaybackPositionTicks ?? 0;
   return { item: full, ticks };
+}
+
+type MpvStream = { type: string; selected?: boolean; external?: boolean; "ff-index"?: number };
+
+/** The Jellyfin indexes of mpv's audio and subtitle tracks. A direct-played
+ * file's stream indexes are ffmpeg's, so they match mpv's `ff-index`. */
+async function mpvStreams() {
+  if (!inTauri()) return null;
+  const list = await playerRequest(["get_property", "track-list"]).catch(() => null);
+  if (!Array.isArray(list)) return null;
+  const tracks = list as MpvStream[];
+  const pick = (type: string) => tracks.find((track) => track.type === type && track.selected);
+  const audio = pick("audio");
+  const subtitle = pick("sub");
+  return {
+    audio: audio && !audio.external ? audio["ff-index"] : undefined,
+    subtitle: !subtitle ? -1 : subtitle.external ? undefined : subtitle["ff-index"],
+  };
 }
 
 export function usePlayback() {

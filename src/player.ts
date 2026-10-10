@@ -1,5 +1,5 @@
 import type { PlayerEvent } from "./types";
-import { webListenNext, webListenPlayer, webPlay, webRequest, webStop } from "./webplayer";
+import { webListenNext, webListenPlayer, webPlay, webRequest, webSetNext, webStop } from "./webplayer";
 import { tv } from "./tv";
 
 export type PlayRequest = {
@@ -62,6 +62,12 @@ export async function playerRequest(command: unknown[]) {
   if (!inTauri()) return webRequest(command);
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<unknown>("player_request", { command });
+}
+
+/** Changes what the browser player moves on to at the end. mpv keeps what it
+ * started with, so the playback provider moves on for it. */
+export function playerSetNext(title: string) {
+  if (!inTauri()) webSetNext(title);
 }
 
 export async function playerStop() {

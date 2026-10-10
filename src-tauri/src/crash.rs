@@ -17,11 +17,16 @@ fn webhook() -> Option<&'static str> {
 }
 /// A crash loop must not flood the channel (Discord allows ~30 posts a minute per webhook).
 const PER_RUN: usize = 5;
+/// Server-side failures (HTTP 5xx) are not Finplay bugs. They have their own,
+/// smaller budget so they never use up the one for real crashes.
+const SERVER_PER_RUN: usize = 2;
+const SERVER_KIND: &str = "Server error";
 const PENDING: &str = "crash-pending.json";
 const OFF: &str = "crash-reports-off";
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static SENT: AtomicUsize = AtomicUsize::new(0);
+static SERVER_SENT: AtomicUsize = AtomicUsize::new(0);
 static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -103,7 +108,7 @@ fn body(report: &Report) -> Value {
         "embeds": [{
             "title": clip(&format!("{} · {}", report.kind, scrub(&report.message)), 250),
             "description": clip(&description, 4000),
-            "color": 0x9333ea,
+            "color": if report.kind == SERVER_KIND { 0x6b7280 } else { 0x9333ea },
             "fields": fields,
         }],
     })
@@ -127,7 +132,8 @@ fn send(report: &Report) -> bool {
     }
     let signature = format!("{}|{}", report.kind, clip(&report.message, 200));
     let fresh = SEEN.get_or_init(|| Mutex::new(HashSet::new())).lock().map(|mut seen| seen.insert(signature)).unwrap_or(false);
-    if !fresh || SENT.fetch_add(1, Ordering::Relaxed) >= PER_RUN {
+    let (sent, limit) = if report.kind == SERVER_KIND { (&SERVER_SENT, SERVER_PER_RUN) } else { (&SENT, PER_RUN) };
+    if !fresh || sent.fetch_add(1, Ordering::Relaxed) >= limit {
         return false;
     }
     post(report)
@@ -217,6 +223,20 @@ mod tests {
         assert!(!clean.contains("marcus"));
         assert!(!clean.contains("Marcus"));
         assert!(clean.contains("static=true"));
+    }
+
+    #[test]
+    fn server_errors_are_grey_and_titled() {
+        let report = Report {
+            kind: SERVER_KIND.into(),
+            message: "HTTP 502 Bad Gateway (Live TV)".into(),
+            stack: "[stream] error: Failed to open https://<server>/…?ApiKey=topsecret".into(),
+            context: "DirectPlay · TvChannel · after 2 retries".into(),
+        };
+        let embed = &body(&report)["embeds"][0];
+        assert_eq!(embed["title"], "Server error · HTTP 502 Bad Gateway (Live TV)");
+        assert_eq!(embed["color"], 0x6b7280);
+        assert!(!body(&report).to_string().contains("topsecret"));
     }
 
     /// Run with FINPLAY_CRASH_WEBHOOK=http://127.0.0.1:18787/hook to check what Discord would receive.

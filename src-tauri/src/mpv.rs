@@ -868,6 +868,10 @@ fn start_player(
         args.push("--keep-open=no".into());
         args.push("--ytdl=yes".into());
         args.push("--ytdl-format=bestvideo[height<=?1080]+bestaudio/best".into());
+    } else {
+        // A Jellyfin stream that fails to open (a 502 from a tuner) would
+        // otherwise be retried through youtube-dl, which only adds delay and noise.
+        args.push("--ytdl=no".into());
     }
     args.extend(carry);
     args.push("--".into());
@@ -880,6 +884,21 @@ fn start_player(
     let library = crate::libmpv::locate(&app);
     #[cfg(not(target_os = "macos"))]
     let library: Option<std::path::PathBuf> = None;
+    if library.is_some() {
+        // With --no-config there are no conditional profiles, so mpv's built-in
+        // auto_profiles script unloads itself during the first file's load hooks
+        // and logs "client removed during hook handling". Older mpv builds reject
+        // this option, so only the bundled libmpv gets it.
+        let at = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+        args.insert(at, "--load-auto-profiles=no".into());
+        // libmpv 0.41.0's coreaudio output registers a device-change listener
+        // before its init can fail (it does on macOS 27: "unable to set the input
+        // channel layout", -50), then frees itself without removing it. The next
+        // audio device change (AirPlay, Sidecar, Bluetooth) calls into freed
+        // memory and crashes Finplay, even long after playback (mpv#18274).
+        // avfoundation registers no CoreAudio listeners.
+        args.insert(at, "--ao=avfoundation".into());
+    }
     let engine = if library.is_some() { "libmpv" } else { "mpv process" };
     // Nothing plays when mpv fails to come up, so the window must not stay fullscreen.
     let undo_fullscreen = || {

@@ -225,7 +225,9 @@ function fileAudio(streams: MediaStream[]) {
 }
 
 /** Audio in the preferred language, else the server's pick for this user; subtitles
- * only when turned on in Settings, except forced ones in the language being heard. */
+ * only when turned on in Settings, except forced ones in the language being heard.
+ * With a subtitle language set, a title lacking it gets only those forced ones,
+ * never whatever language the file marks as default. */
 export function initialStreams(source: MediaSource, settings: { audioLanguage: string; subtitleLanguage: string; subtitlesEnabled: boolean }): StreamChoice {
   const streams = source.MediaStreams ?? [];
   const audio = audioStreams(streams);
@@ -233,18 +235,15 @@ export function initialStreams(source: MediaSource, settings: { audioLanguage: s
   const inLanguage = settings.audioLanguage ? audio.filter((stream) => stream.Language === settings.audioLanguage) : [];
   const chosenAudio = inLanguage.length && !(serverAudio && inLanguage.includes(serverAudio)) ? inLanguage[0] : serverAudio;
   const subs = subtitleStreams(streams);
+  const forced = chosenAudio?.Language ? subs.find((stream) => stream.IsForced && stream.Language === chosenAudio.Language) : undefined;
   let subtitle: MediaStream | undefined;
-  if (settings.subtitlesEnabled) {
-    const wanted = settings.subtitleLanguage ? subs.filter((stream) => stream.Language === settings.subtitleLanguage) : [];
-    subtitle =
-      wanted.find((stream) => !stream.IsForced && isTextSubtitle(stream)) ??
-      wanted.find((stream) => !stream.IsForced) ??
-      wanted[0] ??
-      subs.find((stream) => stream.Index === source.DefaultSubtitleStreamIndex) ??
-      subs.find((stream) => stream.IsDefault) ??
-      subs[0];
-  } else if (chosenAudio?.Language) {
-    subtitle = subs.find((stream) => stream.IsForced && stream.Language === chosenAudio.Language);
+  if (settings.subtitlesEnabled && settings.subtitleLanguage) {
+    const wanted = subs.filter((stream) => stream.Language === settings.subtitleLanguage);
+    subtitle = wanted.find((stream) => !stream.IsForced && isTextSubtitle(stream)) ?? wanted.find((stream) => !stream.IsForced) ?? wanted[0] ?? forced;
+  } else if (settings.subtitlesEnabled) {
+    subtitle = subs.find((stream) => stream.Index === source.DefaultSubtitleStreamIndex) ?? subs.find((stream) => stream.IsDefault) ?? subs[0];
+  } else {
+    subtitle = forced;
   }
   return { audio: chosenAudio?.Index ?? -1, subtitle: subtitle?.Index ?? -1 };
 }

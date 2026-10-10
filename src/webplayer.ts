@@ -115,6 +115,10 @@ export function webPlayNext() {
   for (const handler of nextHandlers) handler();
 }
 
+export function webSetNext(title: string) {
+  if (request) request = { ...request, nextTitle: title };
+}
+
 function autoSkip() {
   if (!request?.autoSkip || !video) return;
   const segment = webSegment(video.currentTime);
@@ -231,7 +235,8 @@ export async function webPlay(next: PlayRequest) {
   if (Hls?.isSupported()) {
     const instance = new Hls({ startPosition: start > 0 ? start : -1 });
     instance.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal) emit("status", "error", data.details);
+      const code = data.response?.code;
+      if (data.fatal) emit("status", "error", code ? `${data.details} (HTTP ${code})` : data.details);
     });
     instance.loadSource(next.url);
     instance.attachMedia(target);
@@ -282,6 +287,12 @@ export async function webRequest(command: unknown[]): Promise<unknown> {
     target.volume = Math.max(0, Math.min(1, b / 100));
   } else if (name === "get_property" && a === "volume") {
     return Math.round(target.volume * 100);
+  } else if (name === "set_property" && a === "mute") {
+    target.muted = Boolean(b);
+  } else if (name === "cycle" && a === "mute") {
+    target.muted = !target.muted;
+  } else if (name === "get_property" && a === "mute") {
+    return target.muted;
   } else if (name === "set_property" && a === "speed" && typeof b === "number") {
     target.playbackRate = b;
   } else if (name === "get_property" && a === "speed") {

@@ -66,6 +66,8 @@ const CARD_FIELDS = "ChildCount,PrimaryImageAspectRatio,Genres";
 
 export type PublicInfo = { Id?: string; ServerName?: string; LocalAddress?: string };
 
+export type ItemFilters = { Genres?: string[]; Tags?: string[]; OfficialRatings?: string[]; Years?: number[] };
+
 /** Unauthenticated, so it is safe to ask an address before trusting it with a token. */
 export async function publicInfo(server: string, timeoutMs: number): Promise<PublicInfo | null> {
   const abort = new AbortController();
@@ -265,6 +267,42 @@ export class Jellyfin {
     return this.json<ItemList>(`/Genres?${params}`);
   }
 
+  /** Genres with their artwork and how many titles each holds, for a library's Genres tab. */
+  genreTiles(parentId: string, includeItemTypes: string) {
+    const params = new URLSearchParams({
+      UserId: this.auth.userId,
+      ParentId: parentId,
+      IncludeItemTypes: includeItemTypes,
+      SortBy: "SortName",
+      Recursive: "true",
+      Fields: "ItemCounts",
+      EnableImageTypes: "Primary",
+      ImageTypeLimit: "1",
+    });
+    return this.json<ItemList>(`/Genres?${params}`);
+  }
+
+  /** The ratings, tags and years present in a library. Tags can run to thousands. */
+  itemFilters(parentId: string, includeItemTypes: string) {
+    const params = new URLSearchParams({ UserId: this.auth.userId, ParentId: parentId, IncludeItemTypes: includeItemTypes });
+    return this.json<ItemFilters>(`/Items/Filters?${params}`);
+  }
+
+  /** Studios matching a search; a movie library can have thousands, so it is never listed whole. */
+  studios(parentId: string, includeItemTypes: string, searchTerm: string, limit = 24) {
+    const params = new URLSearchParams({
+      UserId: this.auth.userId,
+      ParentId: parentId,
+      IncludeItemTypes: includeItemTypes,
+      Recursive: "true",
+      SearchTerm: searchTerm,
+      SortBy: "SortName",
+      Limit: String(limit),
+      EnableImages: "false",
+    });
+    return this.json<ItemList>(`/Studios?${params}`);
+  }
+
   /** Admin only. Sessions with something playing right now. */
   async nowPlaying() {
     const sessions = await this.json<ActiveSession[]>("/Sessions?ActiveWithinSeconds=960");
@@ -314,6 +352,28 @@ export class Jellyfin {
     return this.json<BaseItem[]>(`/Items/${id}/LocalTrailers?${new URLSearchParams({ userId: this.auth.userId })}`);
   }
 
+  /** Behind the scenes, deleted scenes, featurettes and other extras. Trailers come from `localTrailers`. */
+  async specialFeatures(id: string) {
+    try {
+      return await this.json<BaseItem[]>(`/Items/${id}/SpecialFeatures?${new URLSearchParams({ userId: this.auth.userId })}`);
+    } catch (err) {
+      // Servers before 10.9 only have the per-user path.
+      if (err instanceof ApiError && err.status === 404) return this.json<BaseItem[]>(`/Users/${this.auth.userId}/Items/${id}/SpecialFeatures`);
+      throw err;
+    }
+  }
+
+  /** Theme songs for a title, or its series' for a season or episode. */
+  async themeSongs(id: string) {
+    const params = new URLSearchParams({ userId: this.auth.userId, InheritFromParent: "true" });
+    return (await this.json<ItemList>(`/Items/${id}/ThemeSongs?${params}`)).Items ?? [];
+  }
+
+  /** The folders holding an item, nearest first, up to its library and the root. */
+  ancestors(id: string) {
+    return this.json<BaseItem[]>(`/Items/${id}/Ancestors?${new URLSearchParams({ userId: this.auth.userId })}`);
+  }
+
   seasons(seriesId: string) {
     const params = new URLSearchParams({
       UserId: this.auth.userId,
@@ -336,7 +396,7 @@ export class Jellyfin {
   }
 
   async nextEpisode(episode: BaseItem): Promise<BaseItem | undefined> {
-    if (episode.Type !== "Episode" || !episode.SeriesId) return undefined;
+    if (episode.Type !== "Episode" || !episode.SeriesId || episode.ExtraType) return undefined;
     const params = new URLSearchParams({
       UserId: this.auth.userId,
       StartItemId: episode.Id,
@@ -506,10 +566,10 @@ export class Jellyfin {
   }
 
   /** Tells the server other clients may send titles here and control playback. */
-  capabilities() {
+  capabilities(commands: string[]) {
     return this.send("POST", "/Sessions/Capabilities/Full", {
       PlayableMediaTypes: ["Video", "Audio"],
-      SupportedCommands: ["SetVolume", "VolumeUp", "VolumeDown", "ToggleMute", "Mute", "Unmute", "SetAudioStreamIndex", "SetSubtitleStreamIndex", "DisplayMessage", "ToggleFullscreen"],
+      SupportedCommands: commands,
       SupportsMediaControl: true,
       SupportsPersistentIdentifier: true,
     });

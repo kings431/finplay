@@ -235,6 +235,17 @@ export function IconClose({ size }: IconProps) {
   );
 }
 
+export function IconMusic({ size, muted }: IconProps & { muted?: boolean }) {
+  return (
+    <svg {...base(size)}>
+      <path d="M9 17.5V6.5l10-2v11" />
+      <circle cx="6.5" cy="17.5" r="2.5" />
+      <circle cx="16.5" cy="15.5" r="2.5" />
+      {muted ? <path d="m4 4 16 16" /> : null}
+    </svg>
+  );
+}
+
 export function Mark({ size = 36 }: { size?: number }) {
   return <img className="mark" src={markUrl} width={size} height={size} alt="" draggable={false} />;
 }

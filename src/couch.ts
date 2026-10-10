@@ -291,13 +291,23 @@ function beside(current: HTMLElement, direction: Direction) {
   return next instanceof HTMLElement && next.matches(FOCUSABLE) && shown(next) ? next : null;
 }
 
+/** A group can name where Down goes first (`data-down`, a selector), for small
+ * controls off to the side that the nearest card below would always beat. */
+function downTo(current: HTMLElement, direction: Direction) {
+  if (direction !== "down") return null;
+  const selector = current.closest<HTMLElement>("[data-down]")?.dataset.down;
+  if (!selector) return null;
+  const top = current.getBoundingClientRect().bottom;
+  return [...scope().querySelectorAll<HTMLElement>(selector)].find((element) => element.matches(FOCUSABLE) && visible(element) && element.getBoundingClientRect().top >= top) ?? null;
+}
+
 export function move(direction: Direction, instant = false) {
   const current = document.activeElement;
   const inScope = current instanceof HTMLElement && current !== document.body && scope().contains(current) && visible(current);
   // Leaving the sidebar lands on the page's play button rather than whatever
   // sits nearest its edge, like the hero's arrows on Home.
   const entering = inScope && scope() === document && direction === "right" && current.closest(".sidebar") ? onScreenPlay() : null;
-  const next = entering ?? (inScope ? beside(current, direction) ?? pick(current, direction) : first());
+  const next = entering ?? (inScope ? beside(current, direction) ?? downTo(current, direction) ?? pick(current, direction) : first());
   if (next) focus(next, instant);
   else if (inScope && direction === "up" && region(current)?.matches(".main")) {
     const main = document.querySelector<HTMLElement>(".main");
