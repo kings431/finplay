@@ -7,6 +7,7 @@ import { normalizeStatsUrl, openStats } from "../stats";
 import { applyLowPower, applyTheme } from "../theme";
 import { applyCouch } from "../couch";
 import { setCrashReporting } from "../crash";
+import { applyPerfStats } from "../perfstats";
 import { inTauri } from "../player";
 import { tv } from "../tv";
 import { appVersion, findUpdate, installUpdate, type Update } from "../updates";
@@ -312,6 +313,22 @@ export function Settings() {
                 setCrashReporting(!settings.crashReports);
               }}
               aria-pressed={settings.crashReports}
+            />
+          </div>
+        ) : null}
+        {tv ? (
+          <div className="setting-row">
+            <div>
+              <strong>Show performance stats</strong>
+              <p>Shows in a corner how long the TV takes to answer the remote, and how smoothly it scrolls. Useful when reporting that Finplay feels slow.</p>
+            </div>
+            <button
+              className={`switch${settings.perfStats ? " on" : ""}`}
+              onClick={() => {
+                update({ perfStats: !settings.perfStats });
+                applyPerfStats(!settings.perfStats);
+              }}
+              aria-pressed={settings.perfStats}
             />
           </div>
         ) : null}

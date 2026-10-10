@@ -1,14 +1,22 @@
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { IconBack } from "../icons";
 import { episodeCode, tile, primaryUrl, thumbUrl } from "../media";
 import { useSession } from "../session";
+import { tv } from "../tv";
 import type { BaseItem } from "../types";
 
-export function Scroller({ children, className = "" }: { children: ReactNode; className?: string }) {
+/** A TV styles, lays out and keeps every card it is given, so on a TV a long
+ * row starts with this many and grows as focus nears its end. */
+const TV_CARDS = 12;
+
+export function Scroller({ children, className = "", grow = false }: { children: ReactNode; className?: string; grow?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atStart, setAtStart] = useState(true);
   const [atEnd, setAtEnd] = useState(true);
+  const [count, setCount] = useState(TV_CARDS);
+  const cards = tv && grow ? Children.toArray(children) : null;
+  const more = cards ? cards.length > count : false;
 
   const update = useCallback(() => {
     const track = ref.current;
@@ -17,9 +25,11 @@ export function Scroller({ children, className = "" }: { children: ReactNode; cl
     setAtEnd(track.scrollLeft + track.clientWidth >= track.scrollWidth - 4);
   }, []);
 
+  // Couch mode hides the arrows these track, and on a TV re-rendering the row
+  // on every frame of a scroll costs more than the scroll.
   useEffect(() => {
     const track = ref.current;
-    if (!track) return;
+    if (!track || tv) return;
     update();
     const observer = new ResizeObserver(update);
     observer.observe(track);
@@ -42,8 +52,21 @@ export function Scroller({ children, className = "" }: { children: ReactNode; cl
       <button className={`row-nav left ${atStart ? "hidden" : ""}`} onClick={() => scroll(-1)} aria-label="Scroll left" tabIndex={-1}>
         <IconBack size={22} />
       </button>
-      <div className={`row-track ${className}`} ref={ref} onScroll={update}>
-        {children}
+      <div
+        className={`row-track ${className}`}
+        ref={ref}
+        onScroll={tv ? undefined : update}
+        onFocus={
+          more
+            ? (event) => {
+                const index = Array.prototype.indexOf.call(event.currentTarget.children, event.target);
+                // After the frame that shows the move, so the press itself stays quick.
+                if (index >= count - 4) requestAnimationFrame(() => window.setTimeout(() => setCount((shown) => Math.max(shown, index + 4 + TV_CARDS))));
+              }
+            : undefined
+        }
+      >
+        {cards ? cards.slice(0, count) : children}
       </div>
       <button className={`row-nav right ${atEnd ? "hidden" : ""}`} onClick={() => scroll(1)} aria-label="Scroll right" tabIndex={-1}>
         <IconBack size={22} />
@@ -98,7 +121,7 @@ export function Row({
           </button>
         ) : null}
       </div>
-      <Scroller>{children}</Scroller>
+      <Scroller grow>{children}</Scroller>
     </section>
   );
 }

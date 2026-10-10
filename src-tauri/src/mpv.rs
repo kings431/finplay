@@ -95,6 +95,8 @@ struct Shared {
     closed_sent: AtomicBool,
     app: AppHandle,
     made_fullscreen: AtomicBool,
+    /// The window was maximized before `made_fullscreen`; maximize it again after.
+    restore_maximized: AtomicBool,
     stderr: Arc<Mutex<String>>,
     embedded: bool,
     /// Native fullscreen window that hands back to the embedded player.
@@ -304,10 +306,40 @@ fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window("main")
 }
 
+/// Makes Finplay's window fullscreen. Some(was maximized) when it did.
+///
+/// On Windows the window is undecorated, and tao keeps a maximized undecorated
+/// window's client area inside the monitor's work area even in fullscreen, so
+/// the taskbar strip stays uncovered and the video stops short of it. Leave
+/// the maximized state first and return to it in `leave_fullscreen`.
+fn enter_fullscreen(window: &WebviewWindow) -> Option<bool> {
+    if window.is_fullscreen().unwrap_or(false) {
+        return None;
+    }
+    let maximized = cfg!(windows) && window.is_maximized().unwrap_or(false);
+    if maximized {
+        let _ = window.unmaximize();
+    }
+    if window.set_fullscreen(true).is_ok() {
+        return Some(maximized);
+    }
+    if maximized {
+        let _ = window.maximize();
+    }
+    None
+}
+
+fn leave_fullscreen(window: &WebviewWindow, maximized: bool) {
+    let _ = window.set_fullscreen(false);
+    if maximized {
+        let _ = window.maximize();
+    }
+}
+
 fn restore_window(shared: &Shared) {
     if shared.made_fullscreen.swap(false, Ordering::SeqCst) {
         if let Some(window) = main_window(&shared.app) {
-            let _ = window.set_fullscreen(false);
+            leave_fullscreen(&window, shared.restore_maximized.swap(false, Ordering::SeqCst));
         }
     }
 }
@@ -335,9 +367,12 @@ fn toggle_fullscreen(shared: &Arc<Shared>) {
         return;
     }
     if let Some(window) = main_window(&shared.app) {
-        let next = !window.is_fullscreen().unwrap_or(false);
-        if window.set_fullscreen(next).is_ok() {
-            shared.made_fullscreen.store(next, Ordering::SeqCst);
+        if window.is_fullscreen().unwrap_or(false) {
+            leave_fullscreen(&window, shared.restore_maximized.swap(false, Ordering::SeqCst));
+            shared.made_fullscreen.store(false, Ordering::SeqCst);
+        } else if let Some(maximized) = enter_fullscreen(&window) {
+            shared.restore_maximized.store(maximized, Ordering::SeqCst);
+            shared.made_fullscreen.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -554,18 +589,29 @@ pub async fn player_stop(state: State<'_, PlayerState>) -> Result<(), String> {
 }
 
 fn stop_player(inner: &Arc<Mutex<Option<Session>>>) {
-    let session = lock(inner).take();
-    if let Some(mut session) = session {
-        session.shared.suppress_close.store(true, Ordering::SeqCst);
-        session.shared.stop.store(true, Ordering::SeqCst);
-        session.shared.awake.set(false);
-        mpris(&session.shared.app, Update::Stopped);
-        session.child.terminate();
+    stop_session(inner, false);
+}
+
+/// Stops the current player. With `keep_fullscreen` a window it made
+/// fullscreen stays so for the next stream, which takes it over: returns
+/// whether that window was maximized before.
+fn stop_session(inner: &Arc<Mutex<Option<Session>>>, keep_fullscreen: bool) -> Option<bool> {
+    let mut session = lock(inner).take()?;
+    session.shared.suppress_close.store(true, Ordering::SeqCst);
+    session.shared.stop.store(true, Ordering::SeqCst);
+    session.shared.awake.set(false);
+    mpris(&session.shared.app, Update::Stopped);
+    session.child.terminate();
+    let kept = if keep_fullscreen && session.shared.made_fullscreen.swap(false, Ordering::SeqCst) {
+        Some(session.shared.restore_maximized.swap(false, Ordering::SeqCst))
+    } else {
         restore_window(&session.shared);
-        for slot in 0..2 {
-            let _ = std::fs::remove_file(thumb_path(slot));
-        }
+        None
+    };
+    for slot in 0..2 {
+        let _ = std::fs::remove_file(thumb_path(slot));
     }
+    kept
 }
 
 fn thumb_path(slot: u64) -> std::path::PathBuf {
@@ -634,8 +680,6 @@ fn start_player(
             .into_owned()
     };
 
-    stop_player(&inner);
-
     let title: String = request
         .title
         .chars()
@@ -670,16 +714,19 @@ fn start_player(
     } else {
         String::new()
     };
+    let script_path = std::env::temp_dir().join("finplay-osc.lua");
+    std::fs::write(&script_path, include_str!("../player/finplay.lua"))
+        .map_err(|err| format!("Could not write the player overlay: {err}"))?;
+
+    // Replacing an embedded fullscreen stream (next episode, another track or
+    // quality) keeps the window fullscreen instead of bouncing out and back in.
+    let inherited = stop_session(&inner, wid.is_some() && request.fullscreen);
 
     let sock = ipc_path();
     #[cfg(unix)]
     {
         let _ = std::fs::remove_file(&sock);
     }
-
-    let script_path = std::env::temp_dir().join("finplay-osc.lua");
-    std::fs::write(&script_path, include_str!("../player/finplay.lua"))
-        .map_err(|err| format!("Could not write the player overlay: {err}"))?;
 
     let can_mini = cfg!(target_os = "macos") && wid.is_some();
     let mut args: Vec<String> = vec![
@@ -742,6 +789,7 @@ fn start_player(
         }
     }
     let mut made_fullscreen = false;
+    let mut restore_maximized = false;
     if let Some(wid) = wid {
         args.push(format!("--wid={wid}"));
         // Once the child is enabled it receives clicks. Leave dragging off so a
@@ -760,7 +808,10 @@ fn start_player(
         }
         if request.fullscreen {
             if let Some(window) = main_window(&app) {
-                made_fullscreen = !window.is_fullscreen().unwrap_or(false) && window.set_fullscreen(true).is_ok();
+                if let Some(maximized) = enter_fullscreen(&window).or(inherited) {
+                    made_fullscreen = true;
+                    restore_maximized = maximized;
+                }
             }
         }
     }
@@ -830,9 +881,22 @@ fn start_player(
     #[cfg(not(target_os = "macos"))]
     let library: Option<std::path::PathBuf> = None;
     let engine = if library.is_some() { "libmpv" } else { "mpv process" };
+    // Nothing plays when mpv fails to come up, so the window must not stay fullscreen.
+    let undo_fullscreen = || {
+        if made_fullscreen {
+            if let Some(window) = main_window(&app) {
+                leave_fullscreen(&window, restore_maximized);
+            }
+        }
+    };
     let mut child = match library {
         #[cfg(target_os = "macos")]
-        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args, wid.is_some(), Arc::clone(&stderr_tail))?),
+        Some(path) => Engine::Library(
+            crate::libmpv::LibMpv::start(&app, &path, &args, wid.is_some(), Arc::clone(&stderr_tail)).map_err(|err| {
+                undo_fullscreen();
+                err
+            })?,
+        ),
         #[cfg(not(target_os = "macos"))]
         Some(_) => unreachable!(),
         None => {
@@ -848,6 +912,7 @@ fn start_player(
                 command.env_remove("WAYLAND_DISPLAY");
             }
             let mut process = command.spawn().map_err(|err| {
+                undo_fullscreen();
                 if err.kind() == std::io::ErrorKind::NotFound {
                     format!("mpv was not found ({mpv_path}). Install mpv, or set its full path in Settings.")
                 } else {
@@ -866,16 +931,16 @@ fn start_player(
         Ok(stream) => stream,
         Err(err) => {
             child.terminate();
-            if made_fullscreen {
-                if let Some(window) = main_window(&app) {
-                    let _ = window.set_fullscreen(false);
-                }
-            }
+            undo_fullscreen();
             return Err(err);
         }
     };
 
-    let (writer, reader) = split_stream(stream)?;
+    let (writer, reader) = split_stream(stream).map_err(|err| {
+        child.terminate();
+        undo_fullscreen();
+        err
+    })?;
     let shared = Arc::new(Shared {
         writer: Mutex::new(writer),
         pending: Mutex::new(HashMap::new()),
@@ -886,6 +951,7 @@ fn start_player(
         closed_sent: AtomicBool::new(false),
         app: app.clone(),
         made_fullscreen: AtomicBool::new(made_fullscreen),
+        restore_maximized: AtomicBool::new(restore_maximized),
         stderr: Arc::clone(&stderr_tail),
         embedded: wid.is_some(),
         handoff,
@@ -1440,6 +1506,7 @@ mod embed {
     const GW_HWNDNEXT: u32 = 2;
     const GWL_STYLE: i32 = -16;
     const WS_DISABLED: u32 = 0x0800_0000;
+    const WS_THICKFRAME: u32 = 0x0004_0000;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOACTIVATE: u32 = 0x0010;
@@ -1470,9 +1537,12 @@ mod embed {
         let Some(player) = kids.iter().find(|(_, class)| class == "mpv").map(|(hwnd, _)| *hwnd) else {
             return;
         };
+        // Fullscreen drops the resize frame. Tauri's border strip then resizes
+        // nothing but still takes the clicks along the top edge, so go above it.
+        let resizable = unsafe { GetWindowLongPtrW(host, GWL_STYLE) } as u32 & WS_THICKFRAME != 0;
         let insert_after = kids
             .iter()
-            .find(|(_, class)| class == "TAURI_DRAG_RESIZE_BORDERS")
+            .find(|(_, class)| resizable && class == "TAURI_DRAG_RESIZE_BORDERS")
             .map(|(hwnd, _)| *hwnd)
             .unwrap_or(HWND_TOP);
         if !placed(&kids, player, insert_after) {

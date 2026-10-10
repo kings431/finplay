@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { Poster, RankCard, Row, WideCard } from "../components/Cards";
 import { markRequested, SeerrCard, useSeerrPicker } from "../components/RequestSheet";
@@ -43,15 +43,10 @@ let heroMemory: { key: string; heroes: BaseItem[]; index: number } | null = null
 export function Home() {
   const client = useClient();
   const session = useSession();
-  const { play, busy } = usePlayback();
-  const navigate = useNavigate();
-  const [paused, setPaused] = useState(false);
   const [{ heroSources, heroTypes, heroAutoAdvance }] = useState(loadSettings);
   const wantPicks = heroSources.includes("picks");
   const wantFavorites = heroSources.includes("favorites");
   const heroKey = `${session.userId}:${heroSources.join(",")}:${heroTypes}`;
-  const remembered = heroMemory?.key === heroKey ? heroMemory : null;
-  const [heroIndex, setHeroIndex] = useState(remembered?.index ?? 0);
   const { data, error, loading } = useCached(`home:${session.userId}:${heroTypes}:${wantPicks ? "p" : ""}${wantFavorites ? "f" : ""}`, async () => {
     const [resumeList, nextList, latestMovies, latestShows, picks, favorites] = await Promise.all([
       client.resume(),
@@ -96,6 +91,108 @@ export function Home() {
   const candidates = dedupe(heroSources.flatMap((source) => heroFrom[source].filter((item) => heroType(item, heroTypes)).slice(0, heroCap(source))))
     .filter((item) => item.BackdropImageTags?.length || item.ParentBackdropImageTags?.length)
     .slice(0, HERO_COUNT);
+
+  const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
+  const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
+  const top = topTen.data && topTen.data.items.length >= 5 ? topTen.data : undefined;
+  const rows = (more.data ?? []).filter((row) => row.key !== "top");
+
+  const sections = [
+    resume.length > 0 ? (
+      <Row key="home-resume" title="Continue watching">
+        {resume.map((item) => (
+          <WideCard key={item.Id} item={item} />
+        ))}
+      </Row>
+    ) : null,
+    top ? <HomeRowView key="home-top" row={top} /> : null,
+    nextUp.length > 0 ? (
+      <Row key="home-next" title="Next up">
+        {nextUp.map((item) => (
+          <WideCard key={item.Id} item={item} />
+        ))}
+      </Row>
+    ) : null,
+    movies.length > 0 ? (
+      <Row key="home-movies" title="Recently added movies" action={movieLibrary ? { label: "See all", to: `/library/${movieLibrary.Id}` } : undefined}>
+        {movies.map((item) => (
+          <Poster key={item.Id} item={item} />
+        ))}
+      </Row>
+    ) : null,
+    shows.length > 0 ? (
+      <Row key="home-shows" title="Recently added shows" action={showLibrary ? { label: "See all", to: `/library/${showLibrary.Id}` } : undefined}>
+        {shows.map((item) => (
+          <Poster key={item.Id} item={item} />
+        ))}
+      </Row>
+    ) : null,
+    ...rows.slice(0, 4).map((row) => <HomeRowView key={row.key} row={row} />),
+    trending.length > 0 ? (
+      <Row key="home-discover" title="Discover" subtitle="Not on your server yet. Request it." action={{ label: "See all", to: "/discover" }}>
+        {trending.map((result) => (
+          <SeerrCard key={`${result.mediaType}-${result.id}`} result={result} onOpen={picker.open} />
+        ))}
+      </Row>
+    ) : null,
+    ...rows.slice(4).map((row) => <HomeRowView key={row.key} row={row} />),
+  ].filter(Boolean);
+
+  return (
+    <div className="home">
+      <HeroCarousel heroKey={heroKey} candidates={candidates} loading={loading} autoAdvance={heroAutoAdvance} />
+      {error ? <p className="empty">{error}</p> : null}
+      {tv ? <LaterRows>{sections}</LaterRows> : sections}
+      {picker.sheet}
+    </div>
+  );
+}
+
+/** Rows mounted on a TV before any more wait for the page to scroll near them. */
+const TV_ROWS = 4;
+const TV_ROWS_STEP = 3;
+
+/** A TV styles and keeps every card on the page, and Home has hundreds, so
+ * there rows mount a few at a time as the page scrolls toward them. */
+function LaterRows({ children }: { children: ReactNode[] }) {
+  const [count, setCount] = useState(TV_ROWS);
+  const grow = useCallback(() => setCount((current) => current + TV_ROWS_STEP), []);
+  return (
+    <>
+      {children.slice(0, count)}
+      {children.length > count ? <NearEnd key={count} onNear={grow} /> : null}
+    </>
+  );
+}
+
+/** Calls `onNear` once the page has scrolled within a screen of this point. */
+function NearEnd({ onNear }: { onNear: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        onNear();
+      },
+      { root: element.closest(".main"), rootMargin: "0px 0px 100% 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onNear]);
+  return <div ref={ref} style={{ height: 1 }} aria-hidden />;
+}
+
+/** Its own component so a highlight changing, or scrolling out of view,
+ * doesn't re-render every row of cards below it. */
+function HeroCarousel({ heroKey, candidates, loading, autoAdvance }: { heroKey: string; candidates: BaseItem[]; loading: boolean; autoAdvance: boolean }) {
+  const { play, busy } = usePlayback();
+  const navigate = useNavigate();
+  const [paused, setPaused] = useState(false);
+  const remembered = heroMemory?.key === heroKey ? heroMemory : null;
+  const [heroIndex, setHeroIndex] = useState(remembered?.index ?? 0);
   const [heroes, setHeroes] = useState<BaseItem[]>(() => remembered?.heroes ?? candidates);
   useEffect(() => {
     if (heroes.length === 0 && candidates.length > 0) setHeroes(candidates);
@@ -128,130 +225,86 @@ export function Home() {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-
-  const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
-  const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
-  const top = topTen.data && topTen.data.items.length >= 5 ? topTen.data : undefined;
-  const rows = (more.data ?? []).filter((row) => row.key !== "top");
+  // A TV redraws the whole screen for every frame of the dot's progress bar,
+  // so there a plain timer moves the highlights on instead.
+  useEffect(() => {
+    if (!tv || !autoAdvance || paused || offscreen || heroes.length <= 1) return;
+    const timer = window.setTimeout(() => setHeroIndex((current) => (current + 1) % heroes.length), HERO_INTERVAL);
+    return () => window.clearTimeout(timer);
+  }, [autoAdvance, paused, offscreen, heroes.length, heroIndex]);
 
   return (
-    <div className="home">
-      <div
-        ref={carousel}
-        className={`hero-carousel${paused || offscreen ? " paused" : ""}`}
-        onMouseEnter={() => setPaused(true)}
-        onMouseLeave={() => setPaused(false)}
-        onWheel={(event) => {
-          if (heroes.length <= 1) return;
-          const state = swipe.current;
-          const speed = Math.abs(event.deltaX);
-          const horizontal = speed > Math.abs(event.deltaY) && speed > 8;
-          const now = performance.now();
-          window.clearTimeout(state.timer);
-          state.timer = window.setTimeout(() => (state.locked = false), SWIPE_SETTLE);
-          if (state.locked) {
-            // Momentum only slows down, and WebKit's merged events jitter, so a
-            // new flick must climb well above the slowest speed since the peak.
-            if (speed === 0) return;
-            if (state.floor === Infinity) {
-              if (speed >= state.peak) state.peak = speed;
-              else state.floor = speed;
-              return;
-            }
-            if (speed < state.floor) state.floor = speed;
-            const fresh = horizontal && speed >= Math.max(16, state.floor * 3) && now - state.at > SWIPE_MIN_GAP;
-            if (!fresh) return;
-          } else if (!horizontal) {
+    <div
+      ref={carousel}
+      className={`hero-carousel${paused || offscreen ? " paused" : ""}`}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onWheel={(event) => {
+        if (heroes.length <= 1) return;
+        const state = swipe.current;
+        const speed = Math.abs(event.deltaX);
+        const horizontal = speed > Math.abs(event.deltaY) && speed > 8;
+        const now = performance.now();
+        window.clearTimeout(state.timer);
+        state.timer = window.setTimeout(() => (state.locked = false), SWIPE_SETTLE);
+        if (state.locked) {
+          // Momentum only slows down, and WebKit's merged events jitter, so a
+          // new flick must climb well above the slowest speed since the peak.
+          if (speed === 0) return;
+          if (state.floor === Infinity) {
+            if (speed >= state.peak) state.peak = speed;
+            else state.floor = speed;
             return;
           }
-          state.locked = true;
-          state.peak = speed;
-          state.floor = Infinity;
-          state.at = now;
-          stepHero(event.deltaX > 0 ? 1 : -1);
-        }}
-      >
-        {heroes.length > 1 ? (
-          <>
-            <button type="button" className="hero-nav hero-prev" onClick={() => stepHero(-1)} aria-label="Previous highlight">
-              ‹
+          if (speed < state.floor) state.floor = speed;
+          const fresh = horizontal && speed >= Math.max(16, state.floor * 3) && now - state.at > SWIPE_MIN_GAP;
+          if (!fresh) return;
+        } else if (!horizontal) {
+          return;
+        }
+        state.locked = true;
+        state.peak = speed;
+        state.floor = Infinity;
+        state.at = now;
+        stepHero(event.deltaX > 0 ? 1 : -1);
+      }}
+    >
+      {heroes.length > 1 ? (
+        <>
+          <button type="button" className="hero-nav hero-prev" onClick={() => stepHero(-1)} aria-label="Previous highlight">
+            ‹
+          </button>
+          <button type="button" className="hero-nav hero-next" onClick={() => stepHero(1)} aria-label="Next highlight">
+            ›
+          </button>
+        </>
+      ) : null}
+      {hero ? (
+        <Hero
+          items={heroes}
+          index={heroIndex}
+          busy={busy}
+          onPlay={() => void play(hero, { resume: true })}
+          onOpen={() => navigate(`/item/${hero.Id}`)}
+        />
+      ) : (
+        <div className="hero hero-empty">{loading ? <div className="hero-skeleton" /> : <h1>Nothing here yet</h1>}</div>
+      )}
+      {heroes.length > 1 ? (
+        <div className="hero-dots">
+          {heroes.map((item, index) => (
+            <button key={item.Id} className={index === heroIndex ? "on" : ""} onClick={() => setHeroIndex(index)} aria-label={item.Name}>
+              {index === heroIndex && autoAdvance && !tv ? (
+                <span
+                  key={heroIndex}
+                  style={{ animationDuration: `${HERO_INTERVAL}ms` }}
+                  onAnimationEnd={() => setHeroIndex((current) => (current + 1) % heroes.length)}
+                />
+              ) : null}
             </button>
-            <button type="button" className="hero-nav hero-next" onClick={() => stepHero(1)} aria-label="Next highlight">
-              ›
-            </button>
-          </>
-        ) : null}
-        {hero ? (
-          <Hero
-            items={heroes}
-            index={heroIndex}
-            busy={busy}
-            onPlay={() => void play(hero, { resume: true })}
-            onOpen={() => navigate(`/item/${hero.Id}`)}
-          />
-        ) : (
-          <div className="hero hero-empty">{loading ? <div className="hero-skeleton" /> : <h1>Nothing here yet</h1>}</div>
-        )}
-        {heroes.length > 1 ? (
-          <div className="hero-dots">
-            {heroes.map((item, index) => (
-              <button key={item.Id} className={index === heroIndex ? "on" : ""} onClick={() => setHeroIndex(index)} aria-label={item.Name}>
-                {index === heroIndex && heroAutoAdvance ? (
-                  <span
-                    key={heroIndex}
-                    style={{ animationDuration: `${HERO_INTERVAL}ms` }}
-                    onAnimationEnd={() => setHeroIndex((current) => (current + 1) % heroes.length)}
-                  />
-                ) : null}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-      {error ? <p className="empty">{error}</p> : null}
-      {resume.length > 0 ? (
-        <Row title="Continue watching">
-          {resume.map((item) => (
-            <WideCard key={item.Id} item={item} />
           ))}
-        </Row>
+        </div>
       ) : null}
-      {top ? <HomeRowView row={top} /> : null}
-      {nextUp.length > 0 ? (
-        <Row title="Next up">
-          {nextUp.map((item) => (
-            <WideCard key={item.Id} item={item} />
-          ))}
-        </Row>
-      ) : null}
-      {movies.length > 0 ? (
-        <Row title="Recently added movies" action={movieLibrary ? { label: "See all", to: `/library/${movieLibrary.Id}` } : undefined}>
-          {movies.map((item) => (
-            <Poster key={item.Id} item={item} />
-          ))}
-        </Row>
-      ) : null}
-      {shows.length > 0 ? (
-        <Row title="Recently added shows" action={showLibrary ? { label: "See all", to: `/library/${showLibrary.Id}` } : undefined}>
-          {shows.map((item) => (
-            <Poster key={item.Id} item={item} />
-          ))}
-        </Row>
-      ) : null}
-      {rows.slice(0, 4).map((row) => (
-        <HomeRowView key={row.key} row={row} />
-      ))}
-      {trending.length > 0 ? (
-        <Row title="Discover" subtitle="Not on your server yet. Request it." action={{ label: "See all", to: "/discover" }}>
-          {trending.map((result) => (
-            <SeerrCard key={`${result.mediaType}-${result.id}`} result={result} onOpen={picker.open} />
-          ))}
-        </Row>
-      ) : null}
-      {rows.slice(4).map((row) => (
-        <HomeRowView key={row.key} row={row} />
-      ))}
-      {picker.sheet}
     </div>
   );
 }

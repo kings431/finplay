@@ -163,6 +163,7 @@ function WebPlaying() {
   const [shown, setShown] = useState(true);
   const timer = useRef(0);
   const bar = useRef<HTMLDivElement>(null);
+  const playButton = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<MenuKind | null>(null);
   const menuList = useRef<HTMLDivElement>(null);
   /** The transport button a menu opened from, where focus goes back to. */
@@ -369,6 +370,16 @@ function WebPlaying() {
         consume();
         if (!onBar) focusBar();
         nudge(key === "ArrowRight" ? 1 : -1, 10);
+      } else if (key === "ArrowDown" && onBar && shownRef.current) {
+        // The transport row is wider than the bar, so pick Play/Pause rather
+        // than whichever button sits nearest.
+        consume();
+        playButton.current?.focus({ preventScroll: true });
+        wake();
+      } else if (key === "ArrowUp" && shownRef.current && document.activeElement?.closest(".web-osd .transport")) {
+        consume();
+        focusBar();
+        wake();
       } else if (key === "Enter" && onBar) {
         consume();
         if (scrubRef.current) commit();
@@ -507,7 +518,7 @@ function WebPlaying() {
         </div>
         <div className="transport">
           <button onClick={() => void seek(Math.max(0, position - 10))}>−10</button>
-          <button className="btn-play" onClick={() => void togglePause()}>
+          <button ref={playButton} className="btn-play" onClick={() => void togglePause()}>
             {paused || finished ? <IconPlay size={18} /> : <IconPause size={18} />}
             {paused || finished ? "Play" : "Pause"}
           </button>

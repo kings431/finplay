@@ -1,5 +1,6 @@
 import type { Auth } from "./jellyfin";
 import type { BaseItem, MediaSource, MediaStream, PlayMethod } from "./types";
+import { tv } from "./tv";
 
 const TICKS = 10_000_000;
 
@@ -92,7 +93,8 @@ export function imageUrl(
     params.set("maxWidth", String(devicePixels(400, 800)));
     params.set("quality", "75");
   } else {
-    params.set("maxHeight", String(devicePixels(400, 520)));
+    // A TV poster is about 300 pixels tall, and decoding is slow there.
+    params.set("maxHeight", String(devicePixels(tv ? 320 : 400, 520)));
     params.set("quality", "80");
   }
   return `${auth.server}/Items/${itemId}/Images/${kind}?${params}`;
@@ -109,7 +111,7 @@ export function logoUrl(auth: Auth, item: BaseItem) {
 export function thumbUrl(auth: Auth, item: BaseItem) {
   // An episode's Primary image is its own still; the parent thumb is series art.
   if (item.Type === "Episode" && item.ImageTags?.Primary) {
-    return imageUrl(auth, item.Id, "Primary", item.ImageTags.Primary, 0, 800);
+    return imageUrl(auth, item.Id, "Primary", item.ImageTags.Primary, 0, tv ? 440 : 800);
   }
   if (item.ImageTags?.Thumb) return imageUrl(auth, item.Id, "Thumb", item.ImageTags.Thumb);
   if (item.ParentThumbItemId && item.ParentThumbImageTag) {

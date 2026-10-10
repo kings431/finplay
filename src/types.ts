@@ -313,6 +313,8 @@ export type Settings = {
   lowPower: boolean;
   /** Crashes and player failures are sent to the developer, without account details. */
   crashReports: boolean;
+  /** An overlay timing key presses and frames, for reporting how a TV performs. */
+  perfStats: boolean;
 };
 
 export type HeroSource = "resume" | "nextUp" | "picks" | "latest" | "favorites";
@@ -338,6 +340,7 @@ export const DEFAULT_SETTINGS: Settings = {
   playbackSpeed: 1,
   streamystatsUrl: "",
   crashReports: true,
+  perfStats: false,
 };
 
 export type MediaSegment = {

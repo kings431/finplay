@@ -29,6 +29,8 @@ local state = {
     thumb_want = nil,
     thumb_sent = 0,
     thumb_at = nil,
+    -- Where arrow-key and skip-button seeks are heading, previewed on the bar.
+    scrub = nil,
     segments = {},
     skipped = {},
     upnext = nil,
@@ -289,6 +291,12 @@ local function toggle_pause()
 end
 
 local function skip(seconds)
+    -- Repeated presses land before the seek does, so count from the last target.
+    local duration = mp.get_property_number("duration") or 0
+    local from = state.scrub and now() < state.scrub.ends and state.scrub.time or mp.get_property_number("time-pos") or 0
+    if duration > 0 then
+        state.scrub = { time = clamp(from + seconds, 0, duration), ends = now() + 1.5 }
+    end
     mp.commandv("seek", tostring(seconds), "relative", "exact")
 end
 
@@ -791,6 +799,7 @@ local function render()
     end
     local pad = 28 * scale
     ass = assdraw.ass_new()
+    local previewing = false
 
     if show_controls then
         local position = mp.get_property_number("time-pos") or 0
@@ -863,17 +872,32 @@ local function render()
         if ratio > 0 then
             shape(rrect(track_x, bar_y - thick / 2, math.max(thick, track_w * ratio), thick, thick / 2), ACCENT)
         end
-        if (over_bar or state.dragging) and show_controls then
+        local scrubbing = state.scrub and t < state.scrub.ends and not state.menu
+        if (over_bar or state.dragging or scrubbing) and show_controls then
             shape(circle(track_x + track_w * ratio, bar_y, 8 * scale), "FFFFFF")
             if duration > 0 then
-                local hover_ratio = state.dragging and state.drag_ratio or seek_ratio(mouse_x)
+                local hover_ratio
+                if state.dragging then
+                    hover_ratio = state.drag_ratio
+                elseif over_bar then
+                    hover_ratio = seek_ratio(mouse_x)
+                else
+                    hover_ratio = clamp(state.scrub.time / duration, 0, 1)
+                end
                 if opts.trickplay and not state.mini then
+                    previewing = true
                     request_thumb(hover_ratio * duration)
                     if state.thumb then
                         local tw, th = state.thumb.w, state.thumb.h
-                        local tx = clamp(track_x + track_w * hover_ratio - tw / 2, pad, width - pad - tw)
-                        local ty = bar_y - 56 * scale - th
-                        shape(rrect(tx - 3, ty - 3, tw + 6, th + 6, 9 * scale), "161616", "10")
+                        local tx = math.floor(clamp(track_x + track_w * hover_ratio - tw / 2, pad, width - pad - tw))
+                        local ty = math.floor(bar_y - 56 * scale - th)
+                        -- A frame around the picture, never under it: some VOs
+                        -- composite the ASS layer above overlays.
+                        local frame = 3
+                        shape(rect(tx - frame, ty - frame, tw + frame * 2, frame), "161616", "10")
+                        shape(rect(tx - frame, ty + th, tw + frame * 2, frame), "161616", "10")
+                        shape(rect(tx - frame, ty, frame, th), "161616", "10")
+                        shape(rect(tx + tw, ty, frame, th), "161616", "10")
                         show_thumb(tx, ty)
                     end
                 end
@@ -890,6 +914,10 @@ local function render()
         if state.menu and not state.mini then
             draw_menu(pad)
         end
+    end
+    -- Overlays outlive the ASS frame, so a preview nobody is pointing at must go.
+    if not previewing then
+        hide_thumb()
     end
 
     if state.upnext then

@@ -142,10 +142,35 @@ const RETARGET_MS = 160;
 const glides = new Map<HTMLElement, Glide>();
 let gliding = 0;
 
+/** Every glide frame lays out, composites and paints the page again. A TV
+ * that can't keep frames this short is better served by scrolling in one
+ * step, in the same frame as the focus ring moves. */
+const SLOW_FRAME_MS = 34;
+let lastFrame = 0;
+let frames = 0;
+let frameTime = 0;
+let slowGlides = 0;
+let slow = false;
+
 const ease = (t: number) => 1 - (1 - t) ** 3;
+
+function judge() {
+  // The first frame also carries the key press itself, so it isn't counted.
+  if (frames >= 2) slowGlides = frameTime / frames > SLOW_FRAME_MS ? slowGlides + 1 : 0;
+  frames = frameTime = lastFrame = 0;
+  if (slowGlides >= 2 && !slow) {
+    slow = true;
+    document.documentElement.toggleAttribute("data-slow", true);
+  }
+}
 
 function stepGlides(now: number) {
   gliding = 0;
+  if (lastFrame) {
+    frames++;
+    frameTime += now - lastFrame;
+  }
+  lastFrame = now;
   for (const [element, glide] of glides) {
     if (!glide.start) glide.start = now;
     const t = Math.min(1, (now - glide.start) / glide.duration);
@@ -155,11 +180,12 @@ function stepGlides(now: number) {
     if (t >= 1 || !element.isConnected) glides.delete(element);
   }
   if (glides.size) gliding = requestAnimationFrame(stepGlides);
+  else judge();
 }
 
 /** One scroll per container: two at once on the page cancel each other and
  * focus ends up off screen. */
-function glideTo(element: HTMLElement, axis: Axis, to: number) {
+function glideTo(element: HTMLElement, axis: Axis, to: number, instant = false) {
   const max = axis === "left" ? element.scrollWidth - element.clientWidth : element.scrollHeight - element.clientHeight;
   const target = Math.round(Math.max(0, Math.min(max, to)));
   if (!tv) {
@@ -167,6 +193,12 @@ function glideTo(element: HTMLElement, axis: Axis, to: number) {
     return;
   }
   const running = glides.get(element);
+  if (instant || slow) {
+    glides.delete(element);
+    if (axis === "left") element.scrollLeft = target;
+    else element.scrollTop = target;
+    return;
+  }
   if (running?.to === target) return;
   const from = axis === "left" ? element.scrollLeft : element.scrollTop;
   if (!running && Math.abs(target - from) < 1) return;
@@ -174,12 +206,17 @@ function glideTo(element: HTMLElement, axis: Axis, to: number) {
   if (!gliding) gliding = requestAnimationFrame(stepGlides);
 }
 
+/** Whether TV scrolling has given up gliding on this device (for the performance overlay). */
+export function scrollsInstantly() {
+  return slow;
+}
+
 /**
  * Scrolls by a fixed rule rather than just enough, so the screen moves the
  * same way on every press: a card lines up where its row's first card starts,
  * and a row of cards sits at the same height on the page.
  */
-function focus(element: HTMLElement) {
+function focus(element: HTMLElement, instant = false) {
   element.focus({ preventScroll: true });
   const main = document.querySelector<HTMLElement>(".main");
   if (!main?.contains(element)) {
@@ -189,7 +226,7 @@ function focus(element: HTMLElement) {
   const rect = element.getBoundingClientRect();
   const track = element.closest<HTMLElement>(".row-track");
   const lead = track?.firstElementChild;
-  if (track && lead) glideTo(track, "left", rect.left - lead.getBoundingClientRect().left);
+  if (track && lead) glideTo(track, "left", rect.left - lead.getBoundingClientRect().left, instant);
   const view = main.getBoundingClientRect();
   const row = element.closest(".row");
   let top: number | null = null;
@@ -203,7 +240,7 @@ function focus(element: HTMLElement) {
   else if (!pick(element, "up")) top = 0;
   else if (rect.top < view.top + 80) top = main.scrollTop + rect.top - view.top - 120;
   else if (rect.bottom > view.bottom - 40) top = main.scrollTop + rect.bottom - view.bottom + 120;
-  if (top !== null) glideTo(main, "top", top);
+  if (top !== null) glideTo(main, "top", top, instant);
 }
 
 const IN_MAIN = FOCUSABLE.split(", ")
@@ -224,6 +261,9 @@ function first() {
 export function focusFirst() {
   const current = document.activeElement;
   const root = scope();
+  // Just after a move focus is where the remote put it, and measuring it now
+  // would force a layout in the middle of the scroll that followed.
+  if (root === document && performance.now() - lastMove < 1000 && current instanceof HTMLElement && current !== document.body && current.isConnected) return;
   const inside = root === document || (current instanceof Node && root.contains(current));
   if (inside && current instanceof HTMLElement && current !== document.body && current.isConnected && visible(current)) return;
   const next = first();
@@ -242,17 +282,26 @@ function onScreenPlay() {
   );
 }
 
-export function move(direction: Direction) {
+/** Left and right along a row of cards go to the card beside, without
+ * measuring the rest of the page. */
+function beside(current: HTMLElement, direction: Direction) {
+  if (direction !== "left" && direction !== "right") return null;
+  if (!current.parentElement?.classList.contains("row-track")) return null;
+  const next = direction === "right" ? current.nextElementSibling : current.previousElementSibling;
+  return next instanceof HTMLElement && next.matches(FOCUSABLE) && shown(next) ? next : null;
+}
+
+export function move(direction: Direction, instant = false) {
   const current = document.activeElement;
   const inScope = current instanceof HTMLElement && current !== document.body && scope().contains(current) && visible(current);
   // Leaving the sidebar lands on the page's play button rather than whatever
   // sits nearest its edge, like the hero's arrows on Home.
   const entering = inScope && scope() === document && direction === "right" && current.closest(".sidebar") ? onScreenPlay() : null;
-  const next = entering ?? (inScope ? pick(current, direction) : first());
-  if (next) focus(next);
+  const next = entering ?? (inScope ? beside(current, direction) ?? pick(current, direction) : first());
+  if (next) focus(next, instant);
   else if (inScope && direction === "up" && region(current)?.matches(".main")) {
     const main = document.querySelector<HTMLElement>(".main");
-    if (main) glideTo(main, "top", 0);
+    if (main) glideTo(main, "top", 0, instant);
   }
 }
 
@@ -279,7 +328,8 @@ function navigate(direction: Direction, repeated: boolean) {
       return;
     }
   }
-  move(direction);
+  // A held key jumps: gliding behind every repeat only makes a TV fall behind.
+  move(direction, repeated);
   // Timed from when the move is done, so repeats that queued up behind it are dropped.
   lastMove = performance.now();
 }

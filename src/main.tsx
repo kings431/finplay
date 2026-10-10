@@ -10,6 +10,7 @@ import { setDeviceName } from "./jellyfin";
 import { deviceName } from "./player";
 import { installTv, tv } from "./tv";
 import { installCrashReporting } from "./crash";
+import { applyPerfStats } from "./perfstats";
 import "./styles.css";
 
 installTv(focusFirst);
@@ -19,6 +20,7 @@ applyTheme(settings.theme);
 applyCouch(tv || settings.couchMode);
 applyLowPower(settings.lowPower);
 applyPlatform();
+applyPerfStats(settings.perfStats);
 
 // Named before the first server request, so this computer is listed by name.
 void deviceName()
