@@ -719,6 +719,16 @@ button.nav-btn { border: 0; background: none; }
 [data-couch] :focus { outline: none; }
 /* Written out instead of :is(), which the TV's Chromium 85 drops the whole rule over. */
 [data-couch] button:focus, [data-couch] a:focus, [data-couch] input:focus, [data-couch] select:focus, [data-couch] [tabindex]:focus { outline: 3px solid var(--fg); outline-offset: 3px; border-radius: 12px; }
+/* Left and right change a dropdown in couch mode, so it shows ‹ › instead of a menu arrow. */
+[data-couch] select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 46px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='12' viewBox='0 0 24 12' fill='none' stroke='%238e8e93' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2 2 6l4 4M18 2l4 4-4 4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 24px 12px;
+}
 [data-couch] .poster:focus, [data-couch] .wide:focus, [data-couch] .rank-card:focus, [data-couch] .channel-card:focus, [data-couch] .person:focus, [data-couch] .library-card:focus, [data-couch] .profile-tile:focus { outline: none; }
 [data-couch] .poster:focus .poster-art,
 [data-couch] .rank-card:focus .poster-art,
@@ -958,6 +968,8 @@ button.nav-btn { border: 0; background: none; }
 
 .search-page { padding-top: 36px; }
 .search-input { width: calc(100% - 112px); margin: 0 56px 18px; font-size: 18px; }
+.search-recent { padding-top: 4px; contain-intrinsic-size: auto 90px; }
+.search-recent .row-head { margin-bottom: 12px; }
 .results { display: flex; flex-direction: column; padding: 0 48px; }
 .result {
   display: grid;

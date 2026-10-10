@@ -27,6 +27,9 @@ const KEYS: Record<number, string> = {
   412: "MediaRewind",
   10232: "MediaTrackPrevious",
   10233: "MediaTrackNext",
+  // The on-screen keyboard's Done and Cancel.
+  65376: "Accept",
+  65385: "Cancel",
 };
 
 function tizen() {
@@ -72,6 +75,9 @@ export function installTv() {
   document.documentElement.toggleAttribute("data-tv", true);
   window.addEventListener("hashchange", focusSoon);
   focusSoon();
+  // Slow pages, controls removed while focused, and menus that just opened all
+  // leave the remote with nothing to move from.
+  window.setInterval(focusFirst, 700);
   const device = tizen()?.tvinputdevice;
   for (const name of ["MediaPlayPause", "MediaPlay", "MediaPause", "MediaStop", "MediaFastForward", "MediaRewind", "MediaTrackPrevious", "MediaTrackNext"]) {
     try {

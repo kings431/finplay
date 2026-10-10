@@ -8,6 +8,7 @@ import { applyLowPower, applyTheme } from "../theme";
 import { applyCouch } from "../couch";
 import { setCrashReporting } from "../crash";
 import { inTauri } from "../player";
+import { tv } from "../tv";
 import { appVersion, findUpdate, installUpdate, type Update } from "../updates";
 import type { HeroSource, Settings, Theme } from "../types";
 
@@ -72,9 +73,9 @@ function About() {
       <div className="setting-row">
         <div>
           <strong>Finplay {version}</strong>
-          <p>{state?.text ?? "Updates are checked automatically when Finplay starts."}</p>
+          <p>{state?.text ?? (tv ? "New versions are installed from your computer with Apps2Samsung." : "Updates are checked automatically when Finplay starts.")}</p>
         </div>
-        {state?.update ? (
+        {!inTauri() ? null : state?.update ? (
           <button className="btn-primary" disabled={busy} onClick={() => state.update && void install(state.update)}>
             Update and restart
           </button>
@@ -274,20 +275,22 @@ export function Settings() {
             </button>
           ))}
         </div>
-        <div className="setting-row">
-          <div>
-            <strong>Couch mode</strong>
-            <p>Bigger focus highlights and navigation with arrow keys, a TV remote, or a gamepad. Enter or A selects, Backspace or B goes back.</p>
+        {tv ? null : (
+          <div className="setting-row">
+            <div>
+              <strong>Couch mode</strong>
+              <p>Bigger focus highlights and navigation with arrow keys, a TV remote, or a gamepad. Enter or A selects, Backspace or B goes back.</p>
+            </div>
+            <button
+              className={`switch${settings.couchMode ? " on" : ""}`}
+              onClick={() => {
+                update({ couchMode: !settings.couchMode });
+                applyCouch(!settings.couchMode);
+              }}
+              aria-pressed={settings.couchMode}
+            />
           </div>
-          <button
-            className={`switch${settings.couchMode ? " on" : ""}`}
-            onClick={() => {
-              update({ couchMode: !settings.couchMode });
-              applyCouch(!settings.couchMode);
-            }}
-            aria-pressed={settings.couchMode}
-          />
-        </div>
+        )}
         <div className="setting-row">
           <div>
             <strong>Low-power mode</strong>
@@ -379,13 +382,15 @@ export function Settings() {
             ))}
           </select>
         </div>
-        <div className="setting-row">
-          <div>
-            <strong>Open fullscreen</strong>
-            <p>The player window starts fullscreen.</p>
+        {tv ? null : (
+          <div className="setting-row">
+            <div>
+              <strong>Open fullscreen</strong>
+              <p>The player window starts fullscreen.</p>
+            </div>
+            <button className={`switch${settings.fullscreen ? " on" : ""}`} onClick={() => update({ fullscreen: !settings.fullscreen })} aria-pressed={settings.fullscreen} />
           </div>
-          <button className={`switch${settings.fullscreen ? " on" : ""}`} onClick={() => update({ fullscreen: !settings.fullscreen })} aria-pressed={settings.fullscreen} />
-        </div>
+        )}
         <div className="setting-row">
           <div>
             <strong>Auto-play next episode</strong>
@@ -452,13 +457,15 @@ export function Settings() {
             <option value="lime">Lime</option>
           </select>
         </div>
-        <div className="setting-row">
-          <div>
-            <strong>Subtitle font</strong>
-            <p>Leave blank for mpv's default. Examples: sans-serif, serif, monospace.</p>
+        {tv ? null : (
+          <div className="setting-row">
+            <div>
+              <strong>Subtitle font</strong>
+              <p>Leave blank for mpv's default. Examples: sans-serif, serif, monospace.</p>
+            </div>
+            <input value={settings.subtitleFont} onChange={(event) => update({ subtitleFont: event.target.value })} placeholder="sans-serif" />
           </div>
-          <input value={settings.subtitleFont} onChange={(event) => update({ subtitleFont: event.target.value })} placeholder="sans-serif" />
-        </div>
+        )}
         <div className="setting-row">
           <div>
             <strong>Audio language</strong>
@@ -466,13 +473,15 @@ export function Settings() {
           </div>
           <input value={settings.audioLanguage} onChange={(event) => update({ audioLanguage: event.target.value })} placeholder="eng" />
         </div>
-        <div className="setting-row">
-          <div>
-            <strong>mpv path</strong>
-            <p>Leave as mpv to use the player built into Finplay (Windows and macOS) or your system's mpv (Linux). Enter a full path to use a different mpv.</p>
+        {tv ? null : (
+          <div className="setting-row">
+            <div>
+              <strong>mpv path</strong>
+              <p>Leave as mpv to use the player built into Finplay (Windows and macOS) or your system's mpv (Linux). Enter a full path to use a different mpv.</p>
+            </div>
+            <input value={settings.mpvPath} onChange={(event) => update({ mpvPath: event.target.value })} spellCheck={false} />
           </div>
-          <input value={settings.mpvPath} onChange={(event) => update({ mpvPath: event.target.value })} spellCheck={false} />
-        </div>
+        )}
       </section>
       {isAdmin ? (
         <section id="streamystats">

@@ -19,6 +19,7 @@ import { Poster, Scroller } from "../components/Cards";
 import { DownloadButton, SeasonDownload, UnwatchedDownload } from "../components/DownloadButton";
 import { AddToPlaylist } from "../components/AddToPlaylist";
 import { downloadImage, useDownloads } from "../downloads";
+import { inTauri } from "../player";
 import { usePlayback, type PlayOptions } from "../playback";
 import { useSyncPlay } from "../syncplay";
 import { invalidate, useCached } from "../cache";
@@ -304,7 +305,7 @@ export function Detail() {
                   <IconCheck size={19} />
                 </button>
                 {item.Type === "Movie" || item.Type === "Episode" || item.Type === "Series" || item.Type === "Season" ? <AddToPlaylist item={item} /> : null}
-                {item.Type === "Movie" || item.Type === "Episode" ? <DownloadButton item={item} mediaSourceId={sourceId || undefined} /> : null}
+                {inTauri() && (item.Type === "Movie" || item.Type === "Episode") ? <DownloadButton item={item} mediaSourceId={sourceId || undefined} /> : null}
                 <TrailerButton item={item} />
               </>
             ) : null}
@@ -387,8 +388,8 @@ export function Detail() {
               {episodes.length ? <small>{episodes.length} episodes</small> : null}
             </h3>
             <div className="episodes-actions">
-              <SeasonDownload episodes={episodes} />
-              {item.Type === "Series" && unwatched && unwatched.length > 0 ? <UnwatchedDownload episodes={unwatched} /> : null}
+              {inTauri() ? <SeasonDownload episodes={episodes} /> : null}
+              {inTauri() && item.Type === "Series" && unwatched && unwatched.length > 0 ? <UnwatchedDownload episodes={unwatched} /> : null}
               {season ? (
                 <button className="btn-ghost" onClick={() => void markPlayed(season, !(played[season.Id] ?? season.UserData?.Played))}>
                   <IconCheck size={15} />

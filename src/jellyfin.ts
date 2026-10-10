@@ -29,7 +29,7 @@ export class ApiError extends Error {
 }
 
 const CLIENT = "Finplay";
-const VERSION = "0.3.21";
+export const VERSION = "0.3.21";
 let device = "Desktop";
 
 /** Names this computer in other apps' "Play on" lists. Header values must be
@@ -44,7 +44,11 @@ export function setDeviceName(name: string) {
 }
 
 export function normalizeServer(input: string) {
-  const trimmed = input.trim().replace(/\/+$/, "");
+  // The box starts as "http://", so typing a full address after it doubles the scheme.
+  const trimmed = input
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/^(?:https?:\/\/)+(https?:\/\/)/i, "$1");
   if (!/^https?:\/\//i.test(trimmed)) {
     throw new Error("Server address needs to start with http:// or https://");
   }

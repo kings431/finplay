@@ -1,10 +1,11 @@
 import type { Update } from "@tauri-apps/plugin-updater";
+import { VERSION } from "./jellyfin";
 import { inTauri } from "./player";
 
 export type { Update };
 
 export async function appVersion() {
-  if (!inTauri()) return "";
+  if (!inTauri()) return VERSION;
   const { getVersion } = await import("@tauri-apps/api/app");
   return getVersion();
 }
