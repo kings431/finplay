@@ -915,13 +915,14 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         void nudgeVolume(-5);
       } else if (event.key === "Escape") {
         handled = true;
-        void playerRequest(["script-message", "finplay-escape"]);
+        // Through the overlay, which closes an open menu before leaving fullscreen.
+        void playerRequest(["keypress", "ESC"]);
       } else if (event.key === "Backspace") {
         handled = true;
         void playerRequest(["script-message", "finplay-back"]);
       } else if (event.key === "f" || event.key === "F") {
         handled = true;
-        void playerRequest(["script-message", "finplay-fullscreen"]);
+        if (!event.repeat) void playerRequest(["script-message", "finplay-fullscreen"]);
       } else if (event.key === "a" || event.key === "A") {
         handled = true;
         void playerRequest(["keypress", "a"]);

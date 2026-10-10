@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } fro
 import { useNavigate } from "react-router-dom";
 import { admin, sessionCommands, type AdminSession, type SessionItem } from "../../admin";
 import { IconPause, IconPlay, IconStop } from "../../icons";
-import { episodeCode, imageUrl, prettyCodec, resolutionLabel, thumbUrl, tile } from "../../media";
+import { episodeCode, imageUrl, prettyCodec, resolutionLabel, thumbUrl, tile, videoRangeLabel } from "../../media";
 import { useClient, useSession } from "../../session";
 import type { MediaStream } from "../../types";
 import { IconMessage, IconMute, IconNext, IconPrev, IconVolumeDown, IconVolumeUp, ago, clock, errorText, spaced, usePoll, useTicker } from "./ui";
@@ -323,10 +323,10 @@ function StreamInfo({ session, streams }: { session: AdminSession; streams: Stre
   const reasons = info?.TranscodeReasons?.map((reason) => spaced(reason).replace(/ Not /g, " not ").replace(/ Is /g, " is ")) ?? [];
 
   const videoChips = [
-    resolutionLabel(videoConverted ? info?.Height : video?.Height ?? info?.Height),
+    resolutionLabel(videoConverted || !video ? info : video),
     videoConverted ? `${prettyCodec(video?.Codec)} → ${prettyCodec(info?.VideoCodec)}` : prettyCodec(video?.Codec),
     bitrate(videoConverted ? info?.Bitrate : video?.BitRate ?? info?.Bitrate),
-    video?.VideoRangeType && video.VideoRangeType !== "SDR" ? video.VideoRangeType : video?.VideoRange && video.VideoRange !== "SDR" ? video.VideoRange : "",
+    videoRangeLabel(video),
     videoConverted && info?.HardwareAccelerationType ? `HW ${info.HardwareAccelerationType.toUpperCase()}` : "",
   ].filter(Boolean);
   const audioChips = [

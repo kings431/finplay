@@ -15,6 +15,9 @@ export type MediaStream = {
   Title?: string;
   Height?: number;
   Width?: number;
+  IsInterlaced?: boolean;
+  VideoRange?: string;
+  VideoRangeType?: string;
   Channels?: number;
   IsDefault?: boolean;
   IsForced?: boolean;

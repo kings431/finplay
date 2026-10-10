@@ -12,6 +12,7 @@ import {
   prettyCodec,
   primaryUrl,
   resolutionLabel,
+  videoRangeLabel,
   thumbUrl,
   videoStream,
 } from "../media";
@@ -591,7 +592,7 @@ function MediaChips({ source }: { source: MediaSource }) {
   const subtitles = source.MediaStreams?.filter((stream) => stream.Type === "Subtitle").length ?? 0;
   const audios = source.MediaStreams?.filter((stream) => stream.Type === "Audio").length ?? 0;
   const chips = [
-    [resolutionLabel(video?.Height), prettyCodec(video?.Codec)].filter(Boolean).join(" "),
+    [resolutionLabel(video), prettyCodec(video?.Codec), videoRangeLabel(video)].filter(Boolean).join(" "),
     audio ? [prettyCodec(audio.Codec), channelLabel(audio.Channels)].filter(Boolean).join(" ") : "",
     audios > 1 ? `${audios} audio tracks` : "",
     subtitles ? `${subtitles} subtitle${subtitles === 1 ? "" : "s"}` : "",
@@ -677,7 +678,6 @@ function factsOf(item: BaseItem, source: MediaSource | undefined, studioLink: (n
 }
 
 function versionLabel(source: MediaSource) {
-  const video = source.MediaStreams?.find((stream) => stream.Type === "Video");
-  const height = video?.Height ? `${video.Height}p` : "";
-  return [source.Name, source.Container?.toUpperCase(), height, video?.Codec?.toUpperCase()].filter(Boolean).join(" · ");
+  const video = videoStream(source);
+  return [source.Name, source.Container?.toUpperCase(), resolutionLabel(video), video?.Codec?.toUpperCase(), videoRangeLabel(video)].filter(Boolean).join(" · ");
 }

@@ -1068,9 +1068,12 @@ mp.add_forced_key_binding("MBTN_LEFT_DBL", "finplay-double", safe(on_double))
 mp.add_forced_key_binding("MOUSE_MOVE", "finplay-move", safe(on_move))
 mp.add_forced_key_binding("WHEEL_UP", "finplay-wheel-up", safe(on_wheel(1)))
 mp.add_forced_key_binding("WHEEL_DOWN", "finplay-wheel-down", safe(on_wheel(-1)))
-mp.add_forced_key_binding("ESC", "finplay-escape", safe(on_escape))
-mp.add_forced_key_binding("BS", "finplay-back", key(go_back))
-mp.add_forced_key_binding("f", "finplay-fullscreen", key(toggle_fullscreen))
+-- A binding's name is also a script message that runs it. These must not share
+-- a name with an app_message, or sending it runs the binding, which sends it
+-- again, forever: the app then toggles fullscreen as fast as it can.
+mp.add_forced_key_binding("ESC", "finplay-key-escape", safe(on_escape))
+mp.add_forced_key_binding("BS", "finplay-key-back", key(go_back))
+mp.add_forced_key_binding("f", "finplay-key-fullscreen", key(toggle_fullscreen))
 mp.add_forced_key_binding("SPACE", "finplay-pause", key(toggle_pause))
 mp.add_forced_key_binding("LEFT", "finplay-rewind", key(function() skip(-10) end))
 mp.add_forced_key_binding("RIGHT", "finplay-forward", key(function() skip(10) end))

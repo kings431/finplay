@@ -171,13 +171,50 @@ export function prettyCodec(codec?: string) {
   return names[key] ?? codec.toUpperCase();
 }
 
-export function resolutionLabel(height?: number) {
+const RESOLUTIONS: [width: number, height: number, label: string][] = [
+  [256, 144, "144"],
+  [426, 240, "240"],
+  [640, 360, "360"],
+  [682, 384, "384"],
+  [720, 404, "404"],
+  [854, 480, "480"],
+  [960, 544, "540"],
+  [1024, 576, "576"],
+  [1280, 962, "720"],
+  [2560, 1440, "1080"],
+  [4096, 3072, "4K"],
+  [8192, 6144, "8K"],
+];
+
+/** Mirrors Jellyfin's MediaStream.GetResolutionText so scope films (e.g. 1920x800) read as 1080p, not 720p. */
+export function resolutionLabel(video?: { Width?: number; Height?: number; IsInterlaced?: boolean }) {
+  const height = video?.Height;
   if (!height) return "";
-  if (height >= 2000) return "4K";
-  if (height >= 1400) return "1440p";
-  if (height >= 1000) return "1080p";
-  if (height >= 700) return "720p";
-  return `${height}p`;
+  const width = video.Width || Math.round((height * 16) / 9);
+  const match = RESOLUTIONS.find(([w, h]) => width <= w && height <= h);
+  if (!match) return "";
+  const label = match[2];
+  return label.endsWith("K") ? label : `${label}${video.IsInterlaced ? "i" : "p"}`;
+}
+
+const RANGE_TYPES: Record<string, string> = {
+  HDR10Plus: "HDR10+",
+  DOVI: "Dolby Vision",
+  DOVIWithHDR10: "Dolby Vision",
+  DOVIWithHDR10Plus: "Dolby Vision",
+  DOVIWithHLG: "Dolby Vision",
+  DOVIWithSDR: "Dolby Vision",
+  DOVIWithEL: "Dolby Vision",
+  DOVIWithELHDR10Plus: "Dolby Vision",
+  DOVIInvalid: "HDR",
+};
+
+/** HDR flavour of a video stream; empty for SDR or unknown. */
+export function videoRangeLabel(video?: { VideoRange?: string; VideoRangeType?: string }) {
+  const type = video?.VideoRangeType;
+  if (type && type !== "SDR" && type !== "Unknown") return RANGE_TYPES[type] ?? type;
+  const range = video?.VideoRange;
+  return range && range !== "SDR" && range !== "Unknown" ? range : "";
 }
 
 export function videoStream(source?: MediaSource) {
@@ -192,7 +229,7 @@ export function audioStream(source?: MediaSource) {
 export function streamBadge(source: MediaSource) {
   const video = videoStream(source);
   const audio = audioStream(source);
-  return [methodLabel(playMethodOf(source)), [resolutionLabel(video?.Height), prettyCodec(video?.Codec)].filter(Boolean).join(" "), prettyCodec(audio?.Codec)]
+  return [methodLabel(playMethodOf(source)), [resolutionLabel(video), prettyCodec(video?.Codec)].filter(Boolean).join(" "), prettyCodec(audio?.Codec)]
     .filter(Boolean)
     .join(" · ");
 }

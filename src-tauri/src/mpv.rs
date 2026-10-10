@@ -97,6 +97,8 @@ struct Shared {
     made_fullscreen: AtomicBool,
     /// The window was maximized before `made_fullscreen`; maximize it again after.
     restore_maximized: AtomicBool,
+    /// When the last fullscreen toggle was asked for, see `accept_toggle`.
+    toggled: Mutex<Option<Instant>>,
     stderr: Arc<Mutex<String>>,
     embedded: bool,
     /// Native fullscreen window that hands back to the embedded player.
@@ -354,7 +356,26 @@ fn needs_fullscreen_handoff(embedded: bool) -> bool {
     embedded && (wayland_session() || cfg!(target_os = "macos"))
 }
 
+/// Toggles asked for closer together than this are dropped. Each one
+/// unmaximizes or remaximizes the window on Windows, so a stream of them
+/// flickers the whole screen.
+const TOGGLE_GAP: Duration = Duration::from_millis(400);
+
+/// Whether a fullscreen toggle asked for at `now` should run. A request within
+/// `TOGGLE_GAP` of the previous one, accepted or not, is dropped, so a burst
+/// changes the window at most once however long it lasts.
+fn accept_toggle(last: &Mutex<Option<Instant>>, now: Instant) -> bool {
+    let previous = lock(last).replace(now);
+    previous.is_none_or(|at| now.saturating_duration_since(at) >= TOGGLE_GAP)
+}
+
 fn toggle_fullscreen(shared: &Arc<Shared>) {
+    if accept_toggle(&shared.toggled, Instant::now()) {
+        flip_fullscreen(shared);
+    }
+}
+
+fn flip_fullscreen(shared: &Arc<Shared>) {
     #[cfg(target_os = "macos")]
     if crate::libmpv::take_mini() {
         let _ = shared.app.emit("player-mini", false);
@@ -462,7 +483,8 @@ fn escape(shared: &Arc<Shared>) {
             .and_then(|window| window.is_fullscreen().ok())
             .unwrap_or(false);
     if fullscreen {
-        toggle_fullscreen(shared);
+        // Only ever leaves, so it can't bounce and needs no `accept_toggle`.
+        flip_fullscreen(shared);
         return;
     }
     if shared.embedded {
@@ -971,6 +993,7 @@ fn start_player(
         app: app.clone(),
         made_fullscreen: AtomicBool::new(made_fullscreen),
         restore_maximized: AtomicBool::new(restore_maximized),
+        toggled: Mutex::new(None),
         stderr: Arc::clone(&stderr_tail),
         embedded: wid.is_some(),
         handoff,
@@ -1628,6 +1651,48 @@ mod tests {
         assert!(joined.contains("<ip>:8096"));
         assert_eq!(http_status(&lines), "404 Not Found");
         assert_eq!(log_tail(log, 2).len(), 2);
+    }
+
+    /// The quoted strings in the calls to `function` in the overlay script.
+    fn lua_call_args(function: &str) -> Vec<Vec<String>> {
+        let marker = format!("{function}(");
+        include_str!("../player/finplay.lua")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--") && !line.contains(&format!("function {marker}")))
+            .filter_map(|line| line.split_once(&marker).map(|(_, args)| args))
+            .map(|args| args.split('"').skip(1).step_by(2).map(str::to_string).collect())
+            .collect()
+    }
+
+    #[test]
+    fn overlay_messages_do_not_run_its_own_bindings() {
+        let sent: Vec<String> = lua_call_args("app_message").into_iter().filter_map(|args| args.into_iter().next()).collect();
+        assert!(sent.contains(&"finplay-fullscreen".to_string()), "{sent:?}");
+        let bindings: Vec<String> = ["mp.add_forced_key_binding", "mp.add_key_binding"]
+            .iter()
+            .flat_map(|function| lua_call_args(function))
+            .filter_map(|args| args.get(1).cloned())
+            .collect();
+        assert!(bindings.len() > 10, "{bindings:?}");
+        for name in &sent {
+            assert!(!bindings.contains(name), "binding {name} would answer its own script-message forever");
+        }
+    }
+
+    #[test]
+    fn toggle_storm_changes_fullscreen_once() {
+        let last = Mutex::new(None);
+        let start = Instant::now();
+        let ms = |n: u64| start + Duration::from_millis(n);
+        // A message loop asking every 5 ms for three seconds.
+        let accepted = (0..600).filter(|step| accept_toggle(&last, ms(step * 5))).count();
+        assert_eq!(accepted, 1);
+        // Once it stops, the next press works.
+        assert!(accept_toggle(&last, ms(3000 + 400)));
+        // Ordinary presses a second apart all count.
+        assert!(accept_toggle(&last, ms(4400)) && accept_toggle(&last, ms(5400)));
+        // A double press only counts once.
+        assert!(!accept_toggle(&last, ms(5500)));
     }
 
     #[test]
