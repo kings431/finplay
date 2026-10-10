@@ -1,5 +1,5 @@
 import type { Auth } from "./jellyfin";
-import type { BaseItem, MediaSource, PlayMethod } from "./types";
+import type { BaseItem, MediaSource, MediaStream, PlayMethod } from "./types";
 
 const TICKS = 10_000_000;
 
@@ -195,25 +195,94 @@ export function streamBadge(source: MediaSource) {
     .join(" · ");
 }
 
-/** Subtitles the server delivers as separate WebVTT files, for the browser player.
- * The preferred language is shown when subtitles are on. */
-export function subtitleFiles(auth: Auth, source: MediaSource, language: string, enabled: boolean) {
-  const streams = (source.MediaStreams ?? []).filter((stream) => stream.Type === "Subtitle" && stream.DeliveryMethod === "External" && stream.DeliveryUrl);
-  const preferred = enabled
-    ? streams.find((stream) => language && stream.Language === language) ?? streams.find((stream) => stream.IsDefault) ?? streams[0]
-    : undefined;
-  return streams.map((stream) => {
-    const path = stream.DeliveryUrl!;
-    const url = new URL(path.startsWith("http") ? path : `${auth.server}${path.startsWith("/") ? "" : "/"}${path}`);
-    url.searchParams.delete("api_key");
-    url.searchParams.set("ApiKey", auth.token);
-    return {
-      url: url.toString(),
-      label: stream.DisplayTitle || stream.Title || stream.Language || `Subtitle ${stream.Index}`,
-      lang: stream.Language,
-      selected: stream === preferred,
-    };
-  });
+/** Audio and subtitle stream indexes; -1 is none. */
+export type StreamChoice = { audio: number; subtitle: number };
+
+export function audioStreams(streams: MediaStream[] = []) {
+  return streams.filter((stream) => stream.Type === "Audio");
+}
+
+export function subtitleStreams(streams: MediaStream[] = []) {
+  return streams.filter((stream) => stream.Type === "Subtitle");
+}
+
+/** Text subtitles convert to WebVTT; picture ones (PGS, VobSub, DVB) have to be burned in. */
+export function isTextSubtitle(stream: MediaStream) {
+  if (typeof stream.IsTextSubtitleStream === "boolean") return stream.IsTextSubtitleStream;
+  return !/pgs|dvd|dvb|vobsub|xsub/i.test(stream.Codec ?? "");
+}
+
+export function streamLabel(stream: MediaStream) {
+  return stream.DisplayTitle || stream.Title || stream.Language || `${stream.Type} ${stream.Index}`;
+}
+
+/** The audio a direct-played file starts with: the browser can't pick another. */
+function fileAudio(streams: MediaStream[]) {
+  const audio = audioStreams(streams).filter((stream) => !stream.IsExternal);
+  return (audio.find((stream) => stream.IsDefault) ?? audio[0])?.Index ?? -1;
+}
+
+/** Audio in the preferred language, else the server's pick for this user; subtitles
+ * only when turned on in Settings, except forced ones in the language being heard. */
+export function initialStreams(source: MediaSource, settings: { audioLanguage: string; subtitleLanguage: string; subtitlesEnabled: boolean }): StreamChoice {
+  const streams = source.MediaStreams ?? [];
+  const audio = audioStreams(streams);
+  const serverAudio = audio.find((stream) => stream.Index === source.DefaultAudioStreamIndex) ?? audio.find((stream) => stream.IsDefault) ?? audio[0];
+  const inLanguage = settings.audioLanguage ? audio.filter((stream) => stream.Language === settings.audioLanguage) : [];
+  const chosenAudio = inLanguage.length && !(serverAudio && inLanguage.includes(serverAudio)) ? inLanguage[0] : serverAudio;
+  const subs = subtitleStreams(streams);
+  let subtitle: MediaStream | undefined;
+  if (settings.subtitlesEnabled) {
+    const wanted = settings.subtitleLanguage ? subs.filter((stream) => stream.Language === settings.subtitleLanguage) : [];
+    subtitle =
+      wanted.find((stream) => !stream.IsForced && isTextSubtitle(stream)) ??
+      wanted.find((stream) => !stream.IsForced) ??
+      wanted[0] ??
+      subs.find((stream) => stream.Index === source.DefaultSubtitleStreamIndex) ??
+      subs.find((stream) => stream.IsDefault) ??
+      subs[0];
+  } else if (chosenAudio?.Language) {
+    subtitle = subs.find((stream) => stream.IsForced && stream.Language === chosenAudio.Language);
+  }
+  return { audio: chosenAudio?.Index ?? -1, subtitle: subtitle?.Index ?? -1 };
+}
+
+/** Picture subtitles can only be shown by burning them into the video. */
+export function burnsIn(streams: MediaStream[] = [], subtitle: number) {
+  const stream = streams.find((candidate) => candidate.Type === "Subtitle" && candidate.Index === subtitle);
+  return Boolean(stream && !isTextSubtitle(stream));
+}
+
+/** Direct play can't switch audio or burn in subtitles; the server has to stream it. */
+export function needsServerStream(streams: MediaStream[] = [], choice: StreamChoice) {
+  return burnsIn(streams, choice.subtitle) || (choice.audio >= 0 && choice.audio !== fileAudio(streams));
+}
+
+/** Points a Jellyfin HLS address at the chosen audio, and burns in subtitles only when
+ * asked: some servers ignore the indexes sent to PlaybackInfo and burn in the default
+ * text subtitle, which the player shows itself as WebVTT. */
+export function withStreams(url: string, choice: StreamChoice, burn: boolean) {
+  const parsed = new URL(url);
+  if (choice.audio >= 0) parsed.searchParams.set("AudioStreamIndex", String(choice.audio));
+  if (burn) {
+    parsed.searchParams.set("SubtitleStreamIndex", String(choice.subtitle));
+    parsed.searchParams.set("SubtitleMethod", "Encode");
+  } else {
+    parsed.searchParams.delete("SubtitleStreamIndex");
+    parsed.searchParams.delete("SubtitleMethod");
+  }
+  return parsed.toString();
+}
+
+/** A text subtitle as WebVTT. This server refuses `api_key`, so the token goes in `ApiKey`. */
+export function subtitleFile(auth: Auth, itemId: string, mediaSourceId: string, stream: MediaStream) {
+  const params = new URLSearchParams({ ApiKey: auth.token });
+  return {
+    url: `${auth.server}/Videos/${itemId}/${mediaSourceId}/Subtitles/${stream.Index}/0/Stream.vtt?${params}`,
+    label: streamLabel(stream),
+    lang: stream.Language,
+    selected: true,
+  };
 }
 
 export function mediaUrl(auth: Auth, itemId: string, source: MediaSource, playSessionId: string, mediaType?: string) {

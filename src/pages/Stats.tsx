@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
+import { useIsAdmin } from "../admin";
 import { useCached } from "../cache";
 import { IconChart } from "../icons";
 import type { Jellyfin } from "../jellyfin";
@@ -39,13 +40,10 @@ type Report = {
   recent: Play[];
 };
 
+/** The TV's Stats page: now playing plus watch history. Desktop shows these in the Dashboard. */
 export function Stats() {
-  const client = useClient();
-  const { isAdmin, userId } = useSession();
+  const isAdmin = useIsAdmin();
   const [days, setDays] = useState(30);
-  const [statsError, setStatsError] = useState("");
-  const streamystats = loadSettings().streamystatsUrl;
-  const report = useCached(isAdmin ? `stats:${userId}:${days}` : null, () => buildReport(client, days), { maxAge: 60_000 });
   const live = useNowPlaying(isAdmin);
 
   if (!isAdmin) {
@@ -59,7 +57,6 @@ export function Stats() {
     );
   }
 
-  const data = report.data;
   return (
     <div className="page stats-page">
       <header className="page-head">
@@ -67,32 +64,69 @@ export function Stats() {
           <h1>Stats</h1>
           <p>What everyone is watching on your server.</p>
         </div>
-        <div className="stats-head-actions">
-          <div className="chips">
-            {RANGES.map((range) => (
-              <button key={range.days} className={range.days === days ? "on" : ""} onClick={() => setDays(range.days)}>
-                {range.label}
-              </button>
-            ))}
-          </div>
-          {streamystats ? (
-            <button
-              className="btn-ghost"
-              onClick={() => {
-                setStatsError("");
-                openStats(streamystats).catch((err: unknown) => setStatsError(err instanceof Error ? err.message : String(err)));
-              }}
-            >
-              <IconChart size={15} />
-              Streamystats
-            </button>
-          ) : null}
-        </div>
+        <StatsActions days={days} setDays={setDays} />
       </header>
-      {statsError ? <p className="empty error-text">{statsError}</p> : null}
 
       <NowPlaying sessions={live} />
 
+      <StatsReport days={days} />
+    </div>
+  );
+}
+
+/** Watch history for the Dashboard's Stats tab. */
+export function WatchStats() {
+  const [days, setDays] = useState(30);
+  return (
+    <>
+      <div className="dash-section-head stats-embedded-head">
+        <div>
+          <h2>Watch stats</h2>
+          <p>What everyone has watched, from the Playback Reporting plugin.</p>
+        </div>
+        <StatsActions days={days} setDays={setDays} />
+      </div>
+      <StatsReport days={days} />
+    </>
+  );
+}
+
+function StatsActions({ days, setDays }: { days: number; setDays: (days: number) => void }) {
+  const [statsError, setStatsError] = useState("");
+  const streamystats = loadSettings().streamystatsUrl;
+  return (
+    <div className="stats-head-actions">
+      <div className="chips">
+        {RANGES.map((range) => (
+          <button key={range.days} className={range.days === days ? "on" : ""} onClick={() => setDays(range.days)}>
+            {range.label}
+          </button>
+        ))}
+      </div>
+      {streamystats ? (
+        <button
+          className="btn-ghost"
+          onClick={() => {
+            setStatsError("");
+            openStats(streamystats).catch((err: unknown) => setStatsError(err instanceof Error ? err.message : String(err)));
+          }}
+        >
+          <IconChart size={15} />
+          Streamystats
+        </button>
+      ) : null}
+      {statsError ? <p className="error-text stats-action-error">{statsError}</p> : null}
+    </div>
+  );
+}
+
+function StatsReport({ days }: { days: number }) {
+  const client = useClient();
+  const { userId } = useSession();
+  const report = useCached(`stats:${userId}:${days}`, () => buildReport(client, days), { maxAge: 60_000 });
+  const data = report.data;
+  return (
+    <>
       {report.error && !data ? (
         <p className="empty">
           Couldn't read playback history. Stats need the Playback Reporting plugin on your Jellyfin server. ({report.error})
@@ -160,7 +194,7 @@ export function Stats() {
           </section>
         </>
       ) : null}
-    </div>
+    </>
   );
 }
 

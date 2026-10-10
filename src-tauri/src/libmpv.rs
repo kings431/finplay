@@ -159,6 +159,22 @@ fn redact(text: &str) -> String {
     out
 }
 
+/// `[prefix] level: text` for a log event, with the stream's ApiKey cut out.
+unsafe fn log_line(event: &Event) -> Option<String> {
+    if event.event_id != MPV_EVENT_LOG_MESSAGE || event.data.is_null() {
+        return None;
+    }
+    let message = &*(event.data as *const LogMessage);
+    let text = |ptr: *const c_char| {
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().trim().to_string()
+        }
+    };
+    Some(redact(&format!("[{}] {}: {}", text(message.prefix), text(message.level), text(message.text))))
+}
+
 /// Warnings and errors mpv has queued, oldest first.
 fn drain_messages(api: &Api, raw: *mut c_void) -> Vec<String> {
     let mut lines = Vec::new();
@@ -171,16 +187,8 @@ fn drain_messages(api: &Api, raw: *mut c_void) -> Vec<String> {
         if event.event_id == 0 {
             break;
         }
-        if event.event_id == MPV_EVENT_LOG_MESSAGE && !event.data.is_null() {
-            let message = unsafe { &*(event.data as *const LogMessage) };
-            let text = |ptr: *const c_char| {
-                if ptr.is_null() {
-                    String::new()
-                } else {
-                    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().trim().to_string()
-                }
-            };
-            lines.push(redact(&format!("[{}] {}", text(message.prefix), text(message.text))));
+        if let Some(line) = unsafe { log_line(event) } {
+            lines.push(line);
         }
     }
     lines
@@ -629,7 +637,8 @@ pub fn install_key_forwarding(app: &AppHandle) {
 impl LibMpv {
     /// `embed` attaches the player as a borderless child over Finplay. When
     /// false, mpv keeps a normal window suitable for Spaces fullscreen (`--fs`).
-    pub fn start(app: &AppHandle, path: &Path, args: &[String], embed: bool) -> Result<Self, String> {
+    /// mpv's warnings and errors are appended to `log`, as stderr is for the mpv process.
+    pub fn start(app: &AppHandle, path: &Path, args: &[String], embed: bool, log: Arc<Mutex<String>>) -> Result<Self, String> {
         let api = api(path)?;
         let raw = unsafe { (api.create)() };
         if raw.is_null() {
@@ -718,6 +727,11 @@ impl LibMpv {
                 }
                 match unsafe { *event } {
                     MPV_EVENT_SHUTDOWN => break,
+                    MPV_EVENT_LOG_MESSAGE => {
+                        if let Some(line) = unsafe { log_line(&*(event as *const Event)) } {
+                            crate::mpv::push_log(&log, &line);
+                        }
+                    }
                     MPV_EVENT_CLIENT_MESSAGE => {
                         if unsafe { client_message(event) }.as_deref() == Some("finplay-hide-cursor") {
                             let _ = events_app.run_on_main_thread(hide_cursor);

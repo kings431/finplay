@@ -1,6 +1,8 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useIsAdmin } from "../admin";
 import { useDownloads } from "../downloads";
+import { tv } from "../tv";
 import { IconChart, IconCompass, IconDownload, IconFilm, IconGrid, IconHome, IconLive, IconPlaylist, IconSearch, IconSettings, IconTv, IconUsers, Mark } from "../icons";
 import { userImageUrl } from "../media";
 import { usePlayback } from "../playback";
@@ -78,7 +80,8 @@ function ProfileMenu({ avatar }: { avatar?: string }) {
 }
 
 export function Shell() {
-  const { views, imageTag, server, token, userId, deviceId, status, reconnect, isAdmin } = useSession();
+  const { views, imageTag, server, token, userId, deviceId, status, reconnect } = useSession();
+  const isAdmin = useIsAdmin();
   const { active, error, clearError, mini, setMini } = usePlayback();
   const { entries } = useDownloads();
   const location = useLocation();
@@ -172,10 +175,17 @@ export function Shell() {
         </nav>
         <div className="side-foot">
           {isAdmin && !offline ? (
-            <NavLink to="/stats" className={link}>
-              <IconChart />
-              <span>Stats</span>
-            </NavLink>
+            tv ? (
+              <NavLink to="/stats" className={link}>
+                <IconChart />
+                <span>Stats</span>
+              </NavLink>
+            ) : (
+              <NavLink to="/dashboard" className={link}>
+                <IconChart />
+                <span>Dashboard</span>
+              </NavLink>
+            )
           ) : null}
           {offline ? null : <CastButton />}
           {active ? (

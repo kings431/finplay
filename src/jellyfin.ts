@@ -423,19 +423,35 @@ export class Jellyfin {
     return this.items({ searchTerm: term, includeItemTypes, limit });
   }
 
-  playbackInfo(itemId: string, options: { startTicks: number; mediaSourceId?: string; subtitleIndex?: number; maxBitrate: number }) {
-    return this.json<PlaybackInfo>(`/Items/${itemId}/PlaybackInfo`, {
+  /** `direct: false` asks for a server stream, which can switch audio or burn in subtitles. */
+  playbackInfo(
+    itemId: string,
+    options: { startTicks: number; mediaSourceId?: string; audioIndex?: number; subtitleIndex?: number; maxBitrate: number; direct?: boolean },
+  ) {
+    // Some servers only read the stream indexes from the query.
+    const query = new URLSearchParams();
+    if (options.audioIndex !== undefined && options.audioIndex >= 0) query.set("AudioStreamIndex", String(options.audioIndex));
+    if (options.subtitleIndex !== undefined) query.set("SubtitleStreamIndex", String(options.subtitleIndex));
+    const search = query.toString();
+    return this.json<PlaybackInfo>(`/Items/${itemId}/PlaybackInfo${search ? `?${search}` : ""}`, {
       UserId: this.auth.userId,
       MaxStreamingBitrate: options.maxBitrate,
       StartTimeTicks: options.startTicks,
       AutoOpenLiveStream: true,
-      EnableDirectPlay: true,
-      EnableDirectStream: true,
+      EnableDirectPlay: options.direct ?? true,
+      EnableDirectStream: options.direct ?? true,
       EnableTranscoding: true,
       MediaSourceId: options.mediaSourceId,
+      AudioStreamIndex: options.audioIndex !== undefined && options.audioIndex >= 0 ? options.audioIndex : undefined,
       SubtitleStreamIndex: options.subtitleIndex,
       DeviceProfile: deviceProfile(options.maxBitrate),
     });
+  }
+
+  /** Ends the server's transcode for a stream this device has moved off. */
+  async stopEncoding(playSessionId: string) {
+    const params = new URLSearchParams({ DeviceId: this.auth.deviceId, PlaySessionId: playSessionId });
+    await this.send("DELETE", `/Videos/ActiveEncodings?${params}`);
   }
 
   syncGroups() {
@@ -521,6 +537,12 @@ export class Jellyfin {
     return this.send("POST", `/Sessions/${sessionId}/Command`, { Name: name, Arguments: args });
   }
 
+  /** A signed request for callers that build their own paths, such as the admin dashboard.
+   * A 401 here doesn't sign out: Jellyfin also answers 401 for libraries the user can't open. */
+  request(method: string, path: string, body?: unknown) {
+    return this.send(method, path, body, undefined, false);
+  }
+
   seerrUserStatus() {
     return this.seerr<{ active: boolean; userFound: boolean }>("/user-status");
   }
@@ -561,7 +583,7 @@ export class Jellyfin {
     return (await response.json()) as T;
   }
 
-  private async send(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>) {
+  private async send(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>, signOutOn401 = true) {
     let response: Response;
     try {
       response = await fetch(`${this.auth.server}${path}`, {
@@ -578,6 +600,7 @@ export class Jellyfin {
       throw new Error("Could not reach the Jellyfin server.");
     }
     if (response.status === 401) {
+      if (!signOutOn401) throw new ApiError(401, "The server didn't allow that.");
       this.onUnauthorized();
       throw new ApiError(401, "The server session expired. Sign in again.");
     }

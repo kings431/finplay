@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn webhook() -> Option<&'static str> {
     option_env!("FINPLAY_CRASH_WEBHOOK").filter(|url| !url.is_empty())
@@ -24,6 +24,12 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 static SENT: AtomicUsize = AtomicUsize::new(0);
 static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DIR: OnceLock<PathBuf> = OnceLock::new();
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+/// Seconds since `install` ran at startup.
+pub fn uptime() -> f64 {
+    STARTED.get().map_or(0.0, |at| at.elapsed().as_secs_f64())
+}
 
 #[derive(Deserialize)]
 pub struct Report {
@@ -146,6 +152,7 @@ fn panic_report(info: &std::panic::PanicHookInfo<'_>) -> Report {
 
 /// Call once at startup with a writable folder.
 pub fn install(dir: PathBuf) {
+    let _ = STARTED.set(Instant::now());
     let _ = fs::create_dir_all(&dir);
     ENABLED.store(!dir.join(OFF).exists(), Ordering::Relaxed);
     let _ = DIR.set(dir.clone());

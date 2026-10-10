@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::awake::KeepAwake;
@@ -103,6 +103,10 @@ struct Shared {
     request: PlayRequest,
     thumb_counter: AtomicU64,
     awake: KeepAwake,
+    started: Instant,
+    /// Started by `switch_mode` to move playback in or out of fullscreen.
+    restart: bool,
+    engine: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -119,6 +123,32 @@ struct PlayerEvent {
     volume: f64,
     muted: bool,
     rate: f64,
+    /// Only with `reason: "error"`, for the crash report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<Diagnostics>,
+}
+
+/// What was going on when mpv gave up. Log lines have addresses and tokens removed.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Diagnostics {
+    end_reason: String,
+    /// mpv_error_string of the end-file error, e.g. "loading failed".
+    file_error: String,
+    log: Vec<String>,
+    hwdec: String,
+    video_codec: String,
+    file_format: String,
+    position: f64,
+    duration: f64,
+    since_load: f64,
+    seeking: bool,
+    restart: bool,
+    http_status: String,
+    uptime: f64,
+    engine: String,
+    embedded: bool,
+    handoff: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -182,6 +212,11 @@ struct PlaybackProbe {
     volume: f64,
     muted: bool,
     rate: f64,
+    file_error: String,
+    hwdec: String,
+    video_codec: String,
+    file_format: String,
+    last_seek: Option<Instant>,
 }
 
 impl PlayerState {
@@ -236,7 +271,7 @@ pub async fn player_play(
         if handoff {
             wid = None;
         }
-        start_player(app, inner, request, wid, handoff, Vec::new())
+        start_player(app, inner, request, wid, handoff, Vec::new(), false)
     })
     .await
     .map_err(|err| err.to_string())??;
@@ -339,7 +374,8 @@ fn switch_mode(shared: &Arc<Shared>) {
         };
         let resume_at = request.start_seconds;
         let inner = Arc::clone(&shared.app.state::<PlayerState>().inner);
-        if let Err(err) = start_player(shared.app.clone(), inner, request, wid, to_native, carry) {
+        if let Err(err) = start_player(shared.app.clone(), inner, request, wid, to_native, carry, true) {
+            let log = log_tail(&lock(&shared.stderr), LOG_LINES);
             let _ = shared.app.emit(
                 "player",
                 PlayerEvent {
@@ -349,11 +385,29 @@ fn switch_mode(shared: &Arc<Shared>) {
                     paused: true,
                     ended: true,
                     reason: "error".into(),
-                    detail: err,
+                    detail: err.clone(),
                     embedded: false,
                     volume: 100.0,
                     muted: false,
                     rate: 1.0,
+                    diagnostics: Some(Diagnostics {
+                        end_reason: "restart failed".into(),
+                        file_error: redact_line(&err),
+                        http_status: http_status(&log),
+                        log,
+                        hwdec: String::new(),
+                        video_codec: String::new(),
+                        file_format: String::new(),
+                        position: resume_at,
+                        duration: 0.0,
+                        since_load: shared.started.elapsed().as_secs_f64(),
+                        seeking: false,
+                        restart: true,
+                        uptime: crate::crash::uptime(),
+                        engine: shared.engine.into(),
+                        embedded: !to_native,
+                        handoff: to_native,
+                    }),
                 },
             );
         }
@@ -562,6 +616,7 @@ fn start_player(
     wid: Option<i64>,
     handoff: bool,
     carry: Vec<String>,
+    restart: bool,
 ) -> Result<(), String> {
     let media = if request.download_id.is_empty() {
         if !(request.url.starts_with("https://") || request.url.starts_with("http://")) {
@@ -664,8 +719,10 @@ fn start_player(
         "--user-agent=Finplay/0.1.0".into(),
     ];
     // Overwritten each time, so a failed playback can be diagnosed afterwards.
+    // The one before is kept too: a failure is usually followed by a retry.
     if let Ok(dir) = app.path().app_log_dir() {
         if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::rename(dir.join("mpv.log"), dir.join("mpv.previous.log"));
             args.push(format!("--log-file={}", dir.join("mpv.log").display()));
         }
     }
@@ -772,9 +829,10 @@ fn start_player(
     let library = crate::libmpv::locate(&app);
     #[cfg(not(target_os = "macos"))]
     let library: Option<std::path::PathBuf> = None;
+    let engine = if library.is_some() { "libmpv" } else { "mpv process" };
     let mut child = match library {
         #[cfg(target_os = "macos")]
-        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args, wid.is_some())?),
+        Some(path) => Engine::Library(crate::libmpv::LibMpv::start(&app, &path, &args, wid.is_some(), Arc::clone(&stderr_tail))?),
         #[cfg(not(target_os = "macos"))]
         Some(_) => unreachable!(),
         None => {
@@ -835,6 +893,9 @@ fn start_player(
         request: request.clone(),
         thumb_counter: AtomicU64::new(0),
         awake: KeepAwake::new(),
+        started: Instant::now(),
+        restart,
+        engine,
     });
     shared.awake.set(true);
 
@@ -850,6 +911,10 @@ fn start_player(
         (5, "volume"),
         (6, "mute"),
         (7, "speed"),
+        (8, "hwdec-current"),
+        (9, "video-codec"),
+        (10, "file-format"),
+        (11, "seeking"),
     ] {
         let _ = send_command(
             &shared,
@@ -890,6 +955,7 @@ fn start_player(
             volume: 100.0,
             muted: false,
             rate: speed,
+            diagnostics: None,
         },
     );
     // Windows only. macOS draws through libmpv above the page, and on Linux the
@@ -970,6 +1036,11 @@ fn read_loop(app: AppHandle, shared: Arc<Shared>, mut reader: BufReader<Box<dyn 
         volume: 100.0,
         muted: false,
         rate: 1.0,
+        file_error: String::new(),
+        hwdec: String::new(),
+        video_codec: String::new(),
+        file_format: String::new(),
+        last_seek: None,
     };
     let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
     let mut kept_awake = true;
@@ -1051,6 +1122,14 @@ fn apply_message(line: &str, probe: &mut PlaybackProbe) -> bool {
                 "volume" => probe.volume = data.and_then(Value::as_f64).unwrap_or(probe.volume),
                 "mute" => probe.muted = data.and_then(Value::as_bool).unwrap_or(false),
                 "speed" => probe.rate = data.and_then(Value::as_f64).unwrap_or(probe.rate),
+                "hwdec-current" => probe.hwdec = data.and_then(Value::as_str).unwrap_or("").to_string(),
+                "video-codec" => probe.video_codec = data.and_then(Value::as_str).unwrap_or("").to_string(),
+                "file-format" => probe.file_format = data.and_then(Value::as_str).unwrap_or("").to_string(),
+                "seeking" => {
+                    if data.and_then(Value::as_bool).unwrap_or(false) {
+                        probe.last_seek = Some(Instant::now());
+                    }
+                }
                 "eof-reached" => {
                     probe.ended = data.and_then(Value::as_bool).unwrap_or(false);
                     if probe.ended && probe.reason.is_empty() {
@@ -1070,25 +1149,62 @@ fn apply_message(line: &str, probe: &mut PlaybackProbe) -> bool {
             } else if reason == "error" {
                 probe.ended = true;
                 probe.reason = "error".into();
+                probe.file_error = value.get("file_error").and_then(Value::as_str).unwrap_or("").to_string();
             }
+            true
+        }
+        // Another entry loaded after the failed one (a redirect), so playback goes on.
+        Some("file-loaded") if probe.reason == "error" => {
+            probe.ended = false;
+            probe.reason.clear();
+            probe.file_error.clear();
             true
         }
         _ => false,
     }
 }
 
+const LOG_LINES: usize = 40;
+
+fn diagnostics(shared: &Shared, probe: &PlaybackProbe) -> Diagnostics {
+    let log = log_tail(&lock(&shared.stderr), LOG_LINES);
+    Diagnostics {
+        end_reason: probe.reason.clone(),
+        file_error: probe.file_error.clone(),
+        http_status: http_status(&log),
+        log,
+        hwdec: probe.hwdec.clone(),
+        video_codec: probe.video_codec.clone(),
+        file_format: probe.file_format.clone(),
+        position: probe.time,
+        duration: probe.duration,
+        since_load: shared.started.elapsed().as_secs_f64(),
+        seeking: probe.last_seek.is_some_and(|at| at.elapsed() < Duration::from_secs(5)),
+        restart: shared.restart,
+        uptime: crate::crash::uptime(),
+        engine: shared.engine.into(),
+        embedded: shared.embedded,
+        handoff: shared.handoff,
+    }
+}
+
 fn emit_status(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe) {
-    let detail = if probe.reason == "error" {
-        safe_detail(&lock(&shared.stderr))
+    // Stopped by the user or replaced by a newer stream: whatever this mpv
+    // says while shutting down belongs to no playback the app shows.
+    if shared.stop.load(Ordering::SeqCst) {
+        return;
+    }
+    let failed = probe.reason == "error";
+    let detail = if failed {
+        let log = safe_detail(&lock(&shared.stderr));
+        [probe.file_error.as_str(), log.as_str()].iter().filter(|part| !part.is_empty()).copied().collect::<Vec<_>>().join(" · ")
     } else {
         String::new()
     };
-    if !shared.stop.load(Ordering::SeqCst) {
-        mpris(
-            app,
-            Update::Progress { time: probe.time, duration: probe.duration, paused: probe.paused || probe.ended },
-        );
-    }
+    mpris(
+        app,
+        Update::Progress { time: probe.time, duration: probe.duration, paused: probe.paused || probe.ended },
+    );
     let _ = app.emit(
         "player",
         PlayerEvent {
@@ -1103,6 +1219,7 @@ fn emit_status(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe) {
             volume: probe.volume,
             muted: probe.muted,
             rate: probe.rate,
+            diagnostics: failed.then(|| diagnostics(shared, probe)),
         },
     );
 }
@@ -1136,6 +1253,7 @@ fn emit_closed(app: &AppHandle, shared: &Arc<Shared>, probe: &PlaybackProbe, rea
             volume: probe.volume,
             muted: probe.muted,
             rate: probe.rate,
+            diagnostics: None,
         },
     );
     drop_stale_session(app, shared);
@@ -1159,37 +1277,91 @@ fn drain_stderr(mut stderr: std::process::ChildStderr, slot: Arc<Mutex<String>>)
             Ok(size) => {
                 let mut text = lock(&slot);
                 text.push_str(&String::from_utf8_lossy(&buf[..size]));
-                if text.len() > 4000 {
-                    let drop_count = text.len() - 2000;
-                    text.drain(..drop_count);
-                }
+                keep_tail(&mut text);
             }
         }
     }
 }
 
-/// Last few mpv log lines, with every URL cut to scheme and host so the
-/// ApiKey in the stream address never reaches the UI.
-fn safe_detail(text: &str) -> String {
-    let lines: Vec<String> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            line.split(' ')
-                .map(|word| match word.find("://") {
-                    Some(at) => {
-                        let rest = &word[at + 3..];
-                        let host_end = rest.find(['/', '?']).unwrap_or(rest.len());
-                        format!("{}://{}/…", &word[..at], &rest[..host_end])
-                    }
-                    None => word.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
+/// Keeps roughly the last 8 KB of mpv's log, cut at a line start.
+fn keep_tail(text: &mut String) {
+    if text.len() <= 12_000 {
+        return;
+    }
+    let mut cut = text.len() - 8_000;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let cut = text[cut..].find('\n').map_or(cut, |at| cut + at + 1);
+    text.drain(..cut);
+}
+
+/// Appends one mpv log line (libmpv's log messages, the mpv process's stderr).
+pub(crate) fn push_log(slot: &Mutex<String>, line: &str) {
+    let mut text = lock(slot);
+    text.push_str(line);
+    text.push('\n');
+    keep_tail(&mut text);
+}
+
+fn is_ipv4(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|part| (1..=3).contains(&part.len()) && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// A log line with server addresses, IPs, tokens and home folders removed.
+fn redact_line(line: &str) -> String {
+    let mut after_hostname = false;
+    let words: Vec<String> = line
+        .split(' ')
+        .map(|word| {
+            let hostname = std::mem::replace(&mut after_hostname, word.eq_ignore_ascii_case("hostname"));
+            if let Some(at) = word.find("://") {
+                return format!("{}://<server>/…", &word[..at]);
+            }
+            let core = word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.' && ch != ':' && ch != '-');
+            let host = core.split(':').next().unwrap_or(core).trim_end_matches('.');
+            if hostname && !core.is_empty() {
+                return word.replace(core, "<server>");
+            }
+            if is_ipv4(host) {
+                return word.replace(host, "<ip>");
+            }
+            word.to_string()
         })
         .collect();
-    let tail = lines[lines.len().saturating_sub(3)..].join(" · ");
-    tail.chars().take(360).collect()
+    crate::crash::scrub(&words.join(" "))
+}
+
+/// The newest `count` mpv log lines, redacted.
+fn log_tail(text: &str, count: usize) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    lines[lines.len().saturating_sub(count)..]
+        .iter()
+        .map(|line| redact_line(line).chars().take(300).collect())
+        .collect()
+}
+
+/// The status of a failed HTTP request FFmpeg logged, e.g. "404 Not Found".
+fn http_status(log: &[String]) -> String {
+    log.iter()
+        .rev()
+        .find_map(|line| {
+            ["HTTP error ", "Server returned "].iter().find_map(|marker| {
+                let at = line.find(marker)? + marker.len();
+                let rest = &line[at..];
+                rest.get(..3).filter(|code| code.chars().next().is_some_and(|ch| ch.is_ascii_digit()))?;
+                Some(rest.chars().take(40).collect::<String>().trim().to_string())
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Last few mpv log lines, with addresses and tokens removed so the ApiKey in
+/// the stream address never reaches the UI.
+fn safe_detail(text: &str) -> String {
+    let lines = log_tail(text, 3);
+    lines.join(" · ").chars().take(360).collect()
 }
 
 fn ipc_path() -> String {
@@ -1345,5 +1517,51 @@ mod embed {
             return false;
         };
         kids.get(index + 1).is_some_and(|(hwnd, _)| *hwnd == player)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_log_is_redacted() {
+        let log = "[ffmpeg] error: https: HTTP error 404 Not Found\n\
+                   [stream] error: Failed to open https://jf.example.com/Videos/abc/stream.mov?static=true&ApiKey=topsecret.\n\
+                   [ffmpeg] warning: tcp: Failed to connect to 192.168.2.79:8096\n\
+                   [ffmpeg] error: Failed to resolve hostname jf.example.com: nodename nor servname provided\n\
+                   [cplayer] warn: script at /Users/marcus/finplay-osc.lua\n";
+        let lines = log_tail(log, 40);
+        let joined = lines.join("\n");
+        for secret in ["topsecret", "jf.example.com", "192.168.2.79", "marcus"] {
+            assert!(!joined.contains(secret), "{secret} leaked: {joined}");
+        }
+        assert!(joined.contains("<ip>:8096"));
+        assert_eq!(http_status(&lines), "404 Not Found");
+        assert_eq!(log_tail(log, 2).len(), 2);
+    }
+
+    #[test]
+    fn end_file_error_keeps_mpv_error_string() {
+        let mut probe = PlaybackProbe {
+            time: 0.0,
+            duration: 0.0,
+            paused: false,
+            ended: false,
+            reason: String::new(),
+            volume: 100.0,
+            muted: false,
+            rate: 1.0,
+            file_error: String::new(),
+            hwdec: String::new(),
+            video_codec: String::new(),
+            file_format: String::new(),
+            last_seek: None,
+        };
+        apply_message(r#"{"event":"property-change","name":"hwdec-current","data":"videotoolbox"}"#, &mut probe);
+        apply_message(r#"{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"loading failed"}"#, &mut probe);
+        assert_eq!((probe.reason.as_str(), probe.file_error.as_str(), probe.hwdec.as_str()), ("error", "loading failed", "videotoolbox"));
+        apply_message(r#"{"event":"file-loaded"}"#, &mut probe);
+        assert!(probe.reason.is_empty() && !probe.ended);
     }
 }

@@ -423,7 +423,9 @@ button.nav-btn { border: 0; background: none; }
   .hero .hero-media, .hero .hero-copy, .hero-dots button span { transition: none; animation: none; transform: none; }
 }
 
-.row { padding: 22px 0 8px; content-visibility: auto; contain-intrinsic-size: auto 340px; }
+/* The first contain-intrinsic-size is for Chromium before 95 (Samsung TVs),
+   which drops `auto` and would otherwise collapse every off-screen row. */
+.row { padding: 22px 0 8px; content-visibility: auto; contain-intrinsic-size: 1px 340px; contain-intrinsic-size: auto 340px; }
 .row-head, .page-head { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding: 0 56px; }
 .row-head h2, .cast h2, .settings h2 { margin: 0; font-size: 18px; font-weight: 640; }
 .row-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
@@ -483,7 +485,7 @@ button.nav-btn { border: 0; background: none; }
 .poster { width: 164px; flex: 0 0 auto; border: 0; background: none; padding: 0; text-align: left; color: inherit; scroll-snap-align: start; }
 .poster-grid .poster { width: 100%; }
 /* Long library grids: skip layout and paint for cards far off screen. */
-.poster-grid > * { content-visibility: auto; contain-intrinsic-size: auto 320px; }
+.poster-grid > * { content-visibility: auto; contain-intrinsic-size: 1px 320px; contain-intrinsic-size: auto 320px; }
 /* Containment clips paint, which would cut off the hover zoom and shadow. */
 .poster-grid > :hover, .poster-grid > :focus-within { content-visibility: visible; }
 .poster-art, .wide-art, .episode-thumb, .library-card span, .result span:first-child, .person span {
@@ -971,7 +973,7 @@ button.nav-btn { border: 0; background: none; }
 
 .search-page { padding-top: 36px; }
 .search-input { width: calc(100% - 112px); margin: 0 56px 18px; font-size: 18px; }
-.search-recent { padding-top: 4px; contain-intrinsic-size: auto 90px; }
+.search-recent { padding-top: 4px; contain-intrinsic-size: 1px 90px; contain-intrinsic-size: auto 90px; }
 .search-recent .row-head { margin-bottom: 12px; }
 .results { display: flex; flex-direction: column; padding: 0 48px; }
 .result {
@@ -1665,6 +1667,22 @@ button.nav-btn { border: 0; background: none; }
    focus moves land at once and shadows stay small. */
 [data-tv] { --shadow: 0 8px 20px rgba(0, 0, 0, 0.5); }
 [data-tv] .app-shell *, [data-tv] .app-shell *::before, [data-tv] .app-shell *::after { transition: none !important; }
+/* Except the focused card's zoom: a transform alone animates on the compositor. */
+[data-tv][data-couch] .poster .poster-art,
+[data-tv][data-couch] .rank-card .poster-art,
+[data-tv][data-couch] .wide .wide-art,
+[data-tv][data-couch] .channel-card .channel-art,
+[data-tv][data-couch] .library-card span,
+[data-tv][data-couch] .person span:first-child,
+[data-tv][data-couch] .profile-tile .profile-avatar { transition: transform 140ms ease-out !important; }
+/* Focus glides (couch.ts) scroll these every frame. Chromium 85 only scrolls a
+   box on the compositor, without repainting it, if it is opaque or has a layer
+   of its own; snapping would pull each step to the nearest card. */
+[data-tv] .row-track { scroll-snap-type: none; will-change: transform; }
+/* A layer would trap the page's fixed sheets and menus, and the TV theme's glow
+   has to show through, so there the page scrolls the slow way. Isolating it
+   keeps every positioned card from needing a layer of its own. */
+[data-tv]:not([data-theme="tv"]) .main { background: var(--bg); isolation: isolate; }
 [data-tv][data-couch] .poster:focus .poster-art,
 [data-tv][data-couch] .rank-card:focus .poster-art,
 [data-tv][data-couch] .wide:focus .wide-art,
@@ -1797,10 +1815,27 @@ button.nav-btn { border: 0; background: none; }
 .web-player { position: fixed; inset: 0; z-index: 300; background: #000; display: none; }
 [data-web-playing] .web-player { display: block; }
 .web-player video { width: 100%; height: 100%; object-fit: contain; background: #000; }
-.web-player video::cue {
-  font-size: calc(2.6 * var(--vh) * var(--sub-scale, 1));
+.web-subs {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  bottom: calc(7 * var(--vh));
+  text-align: center;
+  pointer-events: none;
+  transition: transform 0.3s;
+}
+[data-osd-shown] .web-subs { transform: translateY(calc(-16 * var(--vh))); }
+.web-subs span {
+  display: inline-block;
+  padding: 0.12em 0.45em;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.6);
   color: var(--sub-color, #fff);
-  background: rgb(0 0 0 / 0.55);
+  font-family: var(--sub-font, inherit);
+  font-size: calc(3.2 * var(--vh) * var(--sub-scale, 1));
+  line-height: 1.3;
+  white-space: pre-line;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
 }
 .web-osd {
   position: fixed;
@@ -1841,6 +1876,36 @@ button.nav-btn { border: 0; background: none; }
 .web-preview span { margin-top: -4px; padding-bottom: 2px; font-size: 15px; opacity: 0.75; }
 .web-osd .transport button { color: #fff; }
 .web-osd .transport button.on { background: rgb(255 255 255 / 0.28); }
+.web-osd-bottom { position: relative; }
+.web-osd .transport { flex-wrap: nowrap; }
+.web-osd .transport button { flex: none; }
+.web-transport-gap { flex: 1; }
+.web-osd .transport .web-track-btn { flex: 0 1 auto; min-width: 72px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; height: 48px; max-width: 240px; padding: 0 18px; line-height: 1.15; text-align: left; }
+.web-track-btn small { font-size: 12px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.06em; }
+.web-track-btn span { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 15px; }
+.web-menu-scrim { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 1; }
+.web-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  z-index: 2;
+  width: 460px;
+  max-width: 100%;
+  padding: 10px;
+  border-radius: 18px;
+  background: rgb(20 20 24 / 0.94);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.55);
+  color: #fff;
+}
+.web-menu-title { margin: 6px 12px 10px; font-size: 14px; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.08em; }
+.web-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: calc(52 * var(--vh)); overflow-y: auto; }
+.web-menu-list button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 8px 14px; border: 0; border-radius: 12px; background: transparent; color: #fff; font: inherit; font-size: 17px; text-align: left; cursor: pointer; }
+.web-menu-list button i { flex: none; width: 18px; font-style: normal; font-weight: 700; }
+.web-menu-list button span { display: flex; flex-direction: column; min-width: 0; }
+.web-menu-list button small { margin-top: 2px; font-size: 13px; opacity: 0.65; }
+.web-menu-list button.on { font-weight: 600; }
+.web-menu-list button:hover { background: rgb(255 255 255 / 0.1); }
+.web-menu-list button:focus { outline: none; background: #fff; color: #000; }
 
 /* Chromium before 88 (Samsung TVs up to 2022) has no aspect-ratio: a padding
    spacer sets the shape and the artwork is laid over it. */

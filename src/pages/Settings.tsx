@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, publicInfo } from "../jellyfin";
-import { loadSettings, saveSettings } from "../settings";
+import { QUALITY_RATES, loadSettings, saveSettings } from "../settings";
 import { useSession } from "../session";
 import { normalizeStatsUrl, openStats } from "../stats";
 import { applyLowPower, applyTheme } from "../theme";
@@ -25,14 +25,6 @@ const THEMES: { id: Theme; label: string; hint: string }[] = [
   { id: "dark", label: "Dark", hint: "Black with blue accents" },
   { id: "light", label: "Light", hint: "Bright and clean" },
   { id: "tv", label: "Apple TV", hint: "Frosted glass, big artwork" },
-];
-
-const RATES = [
-  { value: 1_000_000_000, label: "Original" },
-  { value: 80_000_000, label: "80 Mbps" },
-  { value: 40_000_000, label: "40 Mbps" },
-  { value: 20_000_000, label: "20 Mbps" },
-  { value: 8_000_000, label: "8 Mbps" },
 ];
 
 function About() {
@@ -377,7 +369,7 @@ export function Settings() {
             <p>Original asks Jellyfin for the file as stored. Lower caps can force a transcode.</p>
           </div>
           <select value={settings.maxBitrate} onChange={(event) => update({ maxBitrate: Number(event.target.value) })}>
-            {RATES.map((rate) => (
+            {QUALITY_RATES.map((rate) => (
               <option key={rate.value} value={rate.value}>
                 {rate.label}
               </option>

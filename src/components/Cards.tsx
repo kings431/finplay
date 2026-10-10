@@ -52,6 +52,20 @@ export function Scroller({ children, className = "" }: { children: ReactNode; cl
   );
 }
 
+/** Chromium before 95 (Samsung TVs) lacks `contain-intrinsic-size: auto`, so a
+ * row content-visibility skips would shrink to the stylesheet's guess and the
+ * page below it shift as rows scroll in and out. This keeps each row's real
+ * height instead; while a row is skipped it reports that same height back. */
+const rowSizes =
+  typeof ResizeObserver !== "undefined" && typeof CSS !== "undefined" && !CSS.supports("contain-intrinsic-size", "auto 1px")
+    ? new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const height = Math.round(entry.contentRect.height);
+          if (height > 0) (entry.target as HTMLElement).style.setProperty("contain-intrinsic-size", `1px ${height}px`);
+        }
+      })
+    : null;
+
 export function Row({
   title,
   subtitle,
@@ -64,8 +78,15 @@ export function Row({
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const row = ref.current;
+    if (!row || !rowSizes) return;
+    rowSizes.observe(row);
+    return () => rowSizes.unobserve(row);
+  }, []);
   return (
-    <section className="row">
+    <section className="row" ref={ref}>
       <div className="row-head">
         <div>
           <h2>{title}</h2>

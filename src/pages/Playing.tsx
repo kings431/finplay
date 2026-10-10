@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { IconBack, IconPause, IconPlay } from "../icons";
-import { backdropUrl, formatClock, ticksToSeconds } from "../media";
+import { audioStreams, backdropUrl, formatClock, isTextSubtitle, streamLabel, subtitleStreams, ticksToSeconds } from "../media";
 import { inTauri, playerRequest } from "../player";
-import { methodHint, usePlayback, usePlaybackClock } from "../playback";
+import { methodHint, usePlayback, usePlaybackClock, type ActivePlayback, type StreamChange } from "../playback";
 import { useSession } from "../session";
+import { QUALITY_RATES, loadSettings } from "../settings";
 import { trickplayFrame, trickplaySource, trickplayTileUrl, type TrickplaySource } from "../trickplay";
 import { webNextTitle, webPlayNext, webSegment } from "../webplayer";
 import type { Auth } from "../jellyfin";
@@ -31,6 +32,75 @@ function scrubStep(presses: number, base: number) {
 function formatDelta(seconds: number) {
   return `${seconds < 0 ? "−" : "+"}${formatClock(Math.abs(seconds))}`;
 }
+
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+type MenuKind = "audio" | "subtitles" | "speed" | "quality" | "version";
+type MenuOption = { key: string; label: string; detail?: string; selected: boolean; change?: StreamChange; speed?: number };
+type TrackMenu = { kind: MenuKind; title: string; button: string; value: string; options: MenuOption[] };
+
+/** The player's choices for this title. Each needs more than one option, except
+ * subtitles, which always offer Off. */
+function trackMenus(active: ActivePlayback, speed: number): TrackMenu[] {
+  const menus: TrackMenu[] = [];
+  const valueOf = (options: MenuOption[]) => options.find((option) => option.selected)?.label ?? "";
+  if (active.streams) {
+    const audio = audioStreams(active.streams).map<MenuOption>((stream) => ({
+      key: `a${stream.Index}`,
+      label: streamLabel(stream),
+      detail: stream.IsExternal ? "External file" : undefined,
+      selected: stream.Index === active.audioIndex,
+      change: { audio: stream.Index },
+    }));
+    if (audio.length > 1) menus.push({ kind: "audio", title: "Audio", button: "Audio", value: valueOf(audio), options: audio });
+    const subs = subtitleStreams(active.streams);
+    if (subs.length) {
+      const options: MenuOption[] = [
+        { key: "s-off", label: "Off", selected: (active.subtitleIndex ?? -1) < 0, change: { subtitle: -1 } },
+        ...subs.map<MenuOption>((stream) => ({
+          key: `s${stream.Index}`,
+          label: streamLabel(stream),
+          detail: [stream.IsForced ? "Forced" : "", stream.IsExternal ? "External file" : "", isTextSubtitle(stream) ? "" : "Picture subtitles, restarts the stream"]
+            .filter(Boolean)
+            .join(" · "),
+          selected: stream.Index === active.subtitleIndex,
+          change: { subtitle: stream.Index },
+        })),
+      ];
+      menus.push({ kind: "subtitles", title: "Subtitles", button: "Subtitles", value: valueOf(options), options });
+    }
+  }
+  const speeds = SPEEDS.map<MenuOption>((rate) => ({ key: `r${rate}`, label: rate === 1 ? "Normal" : `${rate}×`, selected: rate === speed, speed: rate }));
+  menus.push({ kind: "speed", title: "Playback speed", button: "Speed", value: speed === 1 ? "1×" : `${speed}×`, options: speeds });
+  if (active.streams && !active.local && !active.trailer) {
+    const quality = QUALITY_RATES.map<MenuOption>((rate) => ({
+      key: `q${rate.value}`,
+      label: rate.label,
+      selected: rate.value === active.maxBitrate,
+      change: { maxBitrate: rate.value },
+    }));
+    menus.push({ kind: "quality", title: "Quality", button: "Quality", value: valueOf(quality) || "Custom", options: quality });
+    const versions = active.item.MediaSources ?? [];
+    if (versions.length > 1) {
+      const options = versions.map<MenuOption>((source, index) => ({
+        key: `v${source.Id}`,
+        label: source.Name || `Version ${index + 1}`,
+        selected: source.Id === active.mediaSourceId,
+        change: { mediaSourceId: source.Id },
+      }));
+      menus.push({ kind: "version", title: "Version", button: "Version", value: valueOf(options), options });
+    }
+  }
+  return menus;
+}
+
+const SWITCHING: Record<MenuKind, string> = {
+  audio: "Switching audio…",
+  subtitles: "Switching subtitles…",
+  speed: "",
+  quality: "Changing quality…",
+  version: "Switching version…",
+};
 
 /** Loads trickplay tile sheets as images and keeps the last few, so the
  * preview can be drawn as a CSS sprite. */
@@ -88,12 +158,19 @@ function useTrickplayTiles(auth: Auth | undefined, source: TrickplaySource | nul
  * sit on top, fading out while it plays untouched. */
 function WebPlaying() {
   const { client } = useSession();
-  const { active, stop, togglePause, seek } = usePlayback();
+  const { active, stop, togglePause, seek, changeStreams } = usePlayback();
   const { position, duration, paused, finished } = usePlaybackClock();
-  const [tracks, setTracks] = useState<MpvTrack[]>([]);
   const [shown, setShown] = useState(true);
   const timer = useRef(0);
   const bar = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<MenuKind | null>(null);
+  const menuList = useRef<HTMLDivElement>(null);
+  /** The transport button a menu opened from, where focus goes back to. */
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const [speed, setSpeed] = useState(() => loadSettings().playbackSpeed || 1);
+  /** "Switching audio…" while a change is under way, or why it failed. */
+  const [note, setNote] = useState("");
+  const noteTimer = useRef(0);
   const positionRef = useRef(position);
   positionRef.current = position;
   const durationRef = useRef(duration);
@@ -191,22 +268,56 @@ function WebPlaying() {
     if (nowTile !== null) tiles.load(nowTile);
   }, [tiles, nowTile]);
 
+  const closeMenu = useCallback(() => {
+    if (opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+    else focusBar();
+    setMenu(null);
+  }, [focusBar]);
+
+  // Land on the current choice when a menu opens.
   useEffect(() => {
-    if (!active) return;
-    let cancel = false;
-    const load = () =>
-      playerRequest(["get_property", "track-list"]).then((value) => {
-        if (!cancel && Array.isArray(value)) setTracks(value as MpvTrack[]);
-      });
-    const first = window.setTimeout(load, 1500);
-    return () => {
-      cancel = true;
-      window.clearTimeout(first);
-    };
-  }, [active]);
+    const list = menuList.current;
+    if (!menu || !list) return;
+    const current = list.querySelector<HTMLButtonElement>('[aria-checked="true"]') ?? list.querySelector("button");
+    current?.focus({ preventScroll: true });
+    current?.scrollIntoView({ block: "nearest" });
+  }, [menu]);
+
+  useEffect(() => () => window.clearTimeout(noteTimer.current), []);
+
+  const pick = useCallback(
+    async (kind: MenuKind, option: MenuOption) => {
+      closeMenu();
+      wake();
+      if (option.selected) return;
+      if (option.speed !== undefined) {
+        setSpeed(option.speed);
+        await playerRequest(["set_property", "speed", option.speed]);
+        return;
+      }
+      if (!option.change) return;
+      window.clearTimeout(noteTimer.current);
+      setNote(SWITCHING[kind]);
+      try {
+        await changeStreams(option.change);
+        setNote("");
+      } catch (err) {
+        setNote(err instanceof Error ? err.message : "That change didn't work.");
+        noteTimer.current = window.setTimeout(() => setNote(""), 5000);
+      }
+    },
+    [closeMenu, wake, changeStreams],
+  );
 
   const shownRef = useRef(shown);
-  shownRef.current = shown || paused;
+  shownRef.current = shown || paused || menu !== null;
+  const visible = shown || paused || menu !== null;
+  // Subtitles move up out of the way of the controls.
+  useEffect(() => {
+    document.documentElement.toggleAttribute("data-osd-shown", visible);
+    return () => document.documentElement.removeAttribute("data-osd-shown");
+  }, [visible]);
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       const key = event.key;
@@ -214,8 +325,25 @@ function WebPlaying() {
         event.preventDefault();
         event.stopImmediatePropagation();
       };
+      const back = key === "GoBack" || key === "BrowserBack" || key === "Escape" || (key === "Backspace" && !(event.target instanceof HTMLInputElement));
+      const list = menuList.current;
+      if (list && (back || key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight" || key === "Enter")) {
+        // An open menu keeps the remote to itself; Back closes it, not the player.
+        consume();
+        wake();
+        const items = [...list.querySelectorAll<HTMLButtonElement>("button")];
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        if (back) closeMenu();
+        else if (key === "Enter") (items[at] ?? items[0])?.click();
+        else if (key === "ArrowUp" || key === "ArrowDown") {
+          const next = items[Math.max(0, Math.min(items.length - 1, at < 0 ? 0 : at + (key === "ArrowDown" ? 1 : -1)))];
+          next?.focus({ preventScroll: true });
+          next?.scrollIntoView({ block: "nearest" });
+        }
+        return;
+      }
       const onBar = document.activeElement === bar.current;
-      if (key === "GoBack" || key === "BrowserBack" || key === "Escape" || (key === "Backspace" && !(event.target instanceof HTMLInputElement))) {
+      if (back) {
         consume();
         if (scrubRef.current) cancelScrub();
         else void stop();
@@ -248,6 +376,10 @@ function WebPlaying() {
         wake();
       } else if (key === "Enter" && document.activeElement?.closest(".web-osd-skip")) {
         wake();
+      } else if (key === "Enter" && shownRef.current && document.activeElement instanceof HTMLButtonElement && document.activeElement.closest(".web-osd")) {
+        consume();
+        document.activeElement.click();
+        wake();
       } else if (!shownRef.current && (key === "ArrowUp" || key === "ArrowDown" || key === "Enter")) {
         consume();
         wake();
@@ -262,7 +394,7 @@ function WebPlaying() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("pointermove", wake);
     };
-  }, [stop, togglePause, wake, commit, cancelScrub, nudge, focusBar]);
+  }, [stop, togglePause, wake, commit, cancelScrub, nudge, focusBar, closeMenu]);
 
   const segment = webSegment(position);
   const nextTitle = webNextTitle();
@@ -285,8 +417,8 @@ function WebPlaying() {
   const head = scrub ?? position;
   const percentOf = (seconds: number) => (duration > 0 ? Math.max(0, Math.min(100, (seconds / duration) * 100)) : 0);
   const percent = percentOf(head);
-  const audio = tracks.filter((track) => track.type === "audio");
-  const subs = tracks.filter((track) => track.type === "sub");
+  const menus = trackMenus(active, speed);
+  const open = menus.find((entry) => entry.kind === menu) ?? null;
 
   const timeAt = (clientX: number) => {
     const rect = bar.current?.getBoundingClientRect();
@@ -314,7 +446,7 @@ function WebPlaying() {
   const half = PREVIEW_WIDTH / 2;
 
   return (
-    <div className={`web-osd${shown || paused ? " shown" : ""}`}>
+    <div className={`web-osd${visible ? " shown" : ""}`}>
       <div className="web-osd-top">
         <button className="btn-round" onClick={() => void stop()} aria-label="Back">
           <IconBack size={20} />
@@ -323,7 +455,7 @@ function WebPlaying() {
           <h1>{active.item.SeriesName ?? active.item.Name}</h1>
           {active.item.SeriesName ? <p>{active.item.Name}</p> : null}
         </div>
-        <span className="eyebrow">{active.badge}</span>
+        <span className="eyebrow">{note || active.badge}</span>
       </div>
       <div className="web-osd-skip" ref={skipRow}>
         {segment && !showNext ? (
@@ -380,27 +512,44 @@ function WebPlaying() {
             {paused || finished ? "Play" : "Pause"}
           </button>
           <button onClick={() => void seek(position + 30)}>+30</button>
-          {audio.length > 1
-            ? audio.map((track) => (
-                <button key={`a${track.id}`} className={track.selected ? "on" : ""} onClick={() => void playerRequest(["set_property", "aid", track.id]).then(() => setTracks((list) => list.map((item) => (item.type === "audio" ? { ...item, selected: item.id === track.id } : item))))}>
-                  {track.title || track.lang || `Audio ${track.id}`}
-                </button>
-              ))
-            : null}
-          {subs.length > 0 ? (
+          <span className="web-transport-gap" />
+          {menus.map((entry) => (
             <button
-              onClick={() => {
-                const index = subs.findIndex((track) => track.selected);
-                const next = index + 1 < subs.length ? subs[index + 1].id : 0;
-                void playerRequest(["set_property", "sid", next]).then(() =>
-                  setTracks((list) => list.map((item) => (item.type === "sub" ? { ...item, selected: item.id === next } : item))),
-                );
+              key={entry.kind}
+              className={`web-track-btn${menu === entry.kind ? " on" : ""}`}
+              aria-haspopup="menu"
+              aria-expanded={menu === entry.kind}
+              onClick={(event) => {
+                if (menu === entry.kind) return closeMenu();
+                opener.current = event.currentTarget;
+                setMenu(entry.kind);
+                wake();
               }}
             >
-              Subtitles: {subs.find((track) => track.selected)?.title ?? "Off"}
+              <small>{entry.button}</small>
+              <span>{entry.value}</span>
             </button>
-          ) : null}
+          ))}
         </div>
+        {open ? (
+          <>
+            <div className="web-menu-scrim" onClick={closeMenu} />
+            <div className="web-menu" ref={menuList} role="menu" aria-label={open.title}>
+              <p className="web-menu-title">{open.title}</p>
+              <div className="web-menu-list">
+                {open.options.map((option) => (
+                  <button key={option.key} role="menuitemradio" aria-checked={option.selected} className={option.selected ? "on" : ""} onClick={() => void pick(open.kind, option)}>
+                    <i aria-hidden="true">{option.selected ? "✓" : ""}</i>
+                    <span>
+                      {option.label}
+                      {option.detail ? <small>{option.detail}</small> : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        ) : null}
       </div>
     </div>
   );

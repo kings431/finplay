@@ -9,20 +9,27 @@ import { TrickplayRenderer, trickplaySource } from "./trickplay";
 import { IconPlay } from "./icons";
 import { nextDownloaded, useDownloads, type DownloadEntry } from "./downloads";
 import {
+  audioStreams,
+  burnsIn,
   episodeCode,
   formatClock,
+  initialStreams,
   mediaUrl,
   methodLabel,
+  needsServerStream,
   playMethodOf,
   playbackTitle,
   secondsToTicks,
   streamBadge,
-  subtitleFiles,
+  subtitleFile,
   ticksToSeconds,
+  withStreams,
+  type StreamChoice,
 } from "./media";
 import type { PlayRequest } from "./player";
-import { reportCrash } from "./crash";
-import type { BaseItem, MediaSegment, MediaSource, PlayMethod, PlayerEvent } from "./types";
+import { webAudioTrack, webSubtitle } from "./webplayer";
+import { reportPlaybackFailure, type PlaybackAction } from "./crash";
+import type { BaseItem, MediaSegment, MediaSource, MediaStream, PlayMethod, PlayerEvent, PlaybackInfo } from "./types";
 
 export type ActivePlayback = {
   item: BaseItem;
@@ -43,7 +50,17 @@ export type ActivePlayback = {
   liveStreamId?: string;
   /** A remote trailer for `item`; nothing is reported to Jellyfin. */
   trailer?: boolean;
+  /** Browser player only: the source's streams and which are playing (-1 none). */
+  streams?: MediaStream[];
+  audioIndex?: number;
+  subtitleIndex?: number;
+  /** The subtitle is burned into the video by the server. */
+  burnIn?: boolean;
+  maxBitrate?: number;
 };
+
+/** What the browser player's menus change; anything left out stays as it is. */
+export type StreamChange = { audio?: number; subtitle?: number; maxBitrate?: number; mediaSourceId?: string };
 
 type PlaybackContextValue = {
   active: ActivePlayback | null;
@@ -60,6 +77,9 @@ type PlaybackContextValue = {
   /** The picture sits in a corner while the rest of the app stays usable. */
   mini: boolean;
   setMini: (on: boolean) => Promise<boolean>;
+  /** Browser player: switches audio, subtitles, quality or version, restarting
+   * the stream at the same spot when it can't be done in place. */
+  changeStreams: (change: StreamChange) => Promise<void>;
 };
 
 export type RemoteSend = (item: BaseItem, startTicks: number, mediaSourceId?: string) => Promise<void>;
@@ -105,6 +125,45 @@ function sourceOf(sources: MediaSource[], preferred?: string) {
   return sources.find((source) => source.Id === preferred) ?? sources[0];
 }
 
+type WebStream = { info: PlaybackInfo; source: MediaSource; method: PlayMethod; url: string; burn: boolean };
+
+/** The browser player's address for `choice`. Direct play is kept when the file
+ * already starts with that audio and the subtitle can be shown as WebVTT;
+ * otherwise the server streams it with those tracks. */
+async function webStream(client: Jellyfin, item: BaseItem, info: PlaybackInfo, source: MediaSource, choice: StreamChoice, maxBitrate: number, startTicks: number): Promise<WebStream> {
+  if (playMethodOf(source) !== "Transcode" && needsServerStream(source.MediaStreams, choice)) {
+    const served = await client.playbackInfo(item.Id, {
+      startTicks,
+      mediaSourceId: source.Id,
+      audioIndex: choice.audio,
+      subtitleIndex: choice.subtitle,
+      maxBitrate,
+      direct: false,
+    });
+    const servedSource = sourceOf(served.MediaSources ?? [], source.Id);
+    if (servedSource) {
+      info = served;
+      source = servedSource;
+    }
+  }
+  const method = playMethodOf(source);
+  const burn = method === "Transcode" && burnsIn(source.MediaStreams, choice.subtitle);
+  let url = mediaUrl(client.auth, item.Id, source, info.PlaySessionId, item.MediaType);
+  if (method === "Transcode") url = withStreams(url, choice, burn);
+  return { info, source, method, url, burn };
+}
+
+/** The WebVTT file for a text subtitle the player draws itself. */
+function textSubtitle(client: Jellyfin, itemId: string, source: MediaSource, index: number, burn: boolean) {
+  const stream = source.MediaStreams?.find((candidate) => candidate.Type === "Subtitle" && candidate.Index === index);
+  return stream && !burn ? subtitleFile(client.auth, itemId, source.Id, stream) : undefined;
+}
+
+function streamsOf(source: MediaSource, choice: StreamChoice, burn: boolean, maxBitrate: number) {
+  const audio = audioStreams(source.MediaStreams).find((stream) => stream.Index === choice.audio);
+  return { streams: source.MediaStreams ?? [], audioIndex: choice.audio, subtitleIndex: choice.subtitle, burnIn: burn, maxBitrate, ...(audio ? { audioCodec: audio.Codec } : {}) };
+}
+
 export function PlaybackProvider({ children }: { children: ReactNode }) {
   const { client, status } = useSession();
   const downloads = useDownloads();
@@ -137,6 +196,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   const sentRef = useRef({ paused: false, position: 0, at: 0, volume: 100, muted: false });
   const nextRef = useRef<BaseItem | null>(null);
   const queueRef = useRef<BaseItem[] | undefined>(undefined);
+  /** What the player was last asked to play, replayed when a stream restarts. */
+  const requestRef = useRef<PlayRequest | null>(null);
+  const actionRef = useRef<PlaybackAction>({ kind: "start", at: 0 });
+  /** The play session a failure was already handled for. */
+  const failedRef = useRef("");
   const playRef = useRef<(item: BaseItem, options?: PlayOptions) => Promise<void>>(async () => {});
   const [resumeAsk, setResumeAsk] = useState<ResumeAsk | null>(null);
   navigateRef.current = navigate;
@@ -160,6 +224,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           VolumeLevel: Math.round(Math.min(100, Math.max(0, muted ? 0 : volume))),
           PlaybackRate: rate,
           PlayMethod: playback.method,
+          AudioStreamIndex: playback.audioIndex,
+          SubtitleStreamIndex: playback.subtitleIndex,
           RepeatMode: "RepeatNone",
           PlaybackOrder: "Default",
           PlaylistItemId: "playlistItem0",
@@ -251,8 +317,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         volumeRef.current.muted !== sent.muted;
       if (changed && !event.ended && !stopSent.current && event.reason !== "error") sendProgress(current, event.paused);
       if (event.reason === "error") {
+        // mpv repeats the failed state until it is stopped; handle it once.
+        if (failedRef.current === current.playSessionId) return;
+        failedRef.current = current.playSessionId;
         const player = inTauri() ? "mpv" : "The player";
-        reportCrash("Playback failed", event.detail || "no detail", `${current.method} · ${current.badge} · ${current.videoCodec ?? "?"}/${current.audioCodec ?? "?"}`);
+        reportPlaybackFailure(event, { ...current, itemType: current.item.Type }, actionRef.current);
         setError(event.detail ? `${player} could not play this stream: ${event.detail}` : `${player} could not play this stream.`);
         void playerStop().then(() => finish(true));
       } else if (event.ended && !stopSent.current) {
@@ -270,6 +339,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       if (!next || !activeRef.current) return;
       nextRef.current = null;
       const queue = queueRef.current;
+      actionRef.current = { kind: "auto-next", at: Date.now() };
       void finish(false).then(() => playRef.current(next, { resume: true, queue }));
     }).then((stopListening) => {
       if (cancel) stopListening();
@@ -331,6 +401,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         nextRef.current = media.next ?? null;
         queueRef.current = options?.queue?.slice(1);
         stopSent.current = false;
+        if (actionRef.current.kind !== "auto-next" || Date.now() - actionRef.current.at > 30_000) actionRef.current = { kind: "start", at: Date.now() };
         positionRef.current = startSeconds;
         activeRef.current = playback;
         setActive(playback);
@@ -340,7 +411,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         setFinished(false);
         try {
           volumeRef.current = { volume: 100, muted: false, rate: settings.playbackSpeed || 1 };
-          await playerPlay({
+          const request: PlayRequest = {
             url: media.url,
             downloadId: media.downloadId,
             title: media.title ?? playbackTitle(playback.item),
@@ -364,7 +435,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
             artUrl: media.artUrl,
             trailer: playback.trailer,
             subtitles: media.subtitles,
-          });
+          };
+          requestRef.current = request;
+          await playerPlay(request);
           void playerFocus();
         } catch (err) {
           if (activeRef.current?.playSessionId === playback.playSessionId) {
@@ -488,25 +561,35 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         });
         let source = sourceOf(info.MediaSources ?? [], options?.mediaSourceId);
         if (!source) throw new Error("Jellyfin did not return a media source.");
+        // The browser player picks its own tracks; mpv reads the language settings itself.
+        const choice = inTauri() ? null : initialStreams(source, settings);
         let method = playMethodOf(source);
         if (method === "Transcode" && startTicks > 0) {
           info = await client.playbackInfo(target.item.Id, {
             startTicks,
             mediaSourceId: source.Id,
-            subtitleIndex: settings.subtitlesEnabled ? undefined : -1,
+            audioIndex: choice?.audio,
+            subtitleIndex: choice ? choice.subtitle : settings.subtitlesEnabled ? undefined : -1,
             maxBitrate: settings.maxBitrate,
           });
           source = sourceOf(info.MediaSources ?? [], source.Id);
           if (!source) throw new Error("Jellyfin did not return a media source.");
           method = playMethodOf(source);
         }
-        const url = mediaUrl(client.auth, target.item.Id, source, info.PlaySessionId, target.item.MediaType);
+        let url: string;
+        let burn = false;
+        if (choice) {
+          ({ info, source, method, url, burn } = await webStream(client, target.item, info, source, choice, settings.maxBitrate, startTicks));
+        } else {
+          url = mediaUrl(client.auth, target.item.Id, source, info.PlaySessionId, target.item.MediaType);
+        }
         // The HLS playlist spans the whole title; the browser player seeks into it
         // instead of treating the transcode start as zero.
         const offset = method === "Transcode" && inTauri();
         const badge = streamBadge(source);
         const video = source.MediaStreams?.find((stream) => stream.Type === "Video");
         const audio = source.MediaStreams?.find((stream) => stream.Type === "Audio");
+        const subtitle = choice ? textSubtitle(client, target.item.Id, source, choice.subtitle, burn) : undefined;
         const playback: ActivePlayback = {
           item: target.item,
           playSessionId: info.PlaySessionId,
@@ -519,6 +602,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           height: video?.Height,
           returnTo: options?.returnTo,
           liveStreamId: source.LiveStreamId ?? undefined,
+          ...(choice ? streamsOf(source, choice, burn, settings.maxBitrate) : {}),
         };
         const startSeconds = offset ? 0 : ticksToSeconds(startTicks);
         const preview = trickplaySource(target.item, source.Id, ticksToSeconds(playback.baseTicks));
@@ -531,7 +615,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           segments: segmentsFor(segments, ticksToSeconds(playback.baseTicks)),
           next,
           artUrl: `${client.auth.server}/Items/${target.item.SeriesId ?? target.item.Id}/Images/Primary?maxHeight=400`,
-          subtitles: inTauri() ? undefined : subtitleFiles(client.auth, source, settings.subtitleLanguage, settings.subtitlesEnabled),
+          subtitles: subtitle ? [subtitle] : undefined,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : typeof err === "string" && err ? err : "Playback failed.");
@@ -544,6 +628,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   playRef.current = play;
 
   const stop = useCallback(async () => {
+    actionRef.current = { kind: "stop", at: Date.now() };
     await playerStop();
     await finish(true);
   }, [finish]);
@@ -553,10 +638,95 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const seek = useCallback(async (seconds: number) => {
+    actionRef.current = { kind: "seek", at: Date.now() };
     await playerRequest(["seek", seconds, "absolute"]);
     positionRef.current = seconds;
     setPosition(seconds);
   }, []);
+
+  const changeStreams = useCallback(
+    async (change: StreamChange) => {
+      const current = activeRef.current;
+      const request = requestRef.current;
+      if (!client || !current?.streams || !request || inTauri()) return;
+      const settings = loadSettings();
+      const sourceId = change.mediaSourceId ?? current.mediaSourceId;
+      const maxBitrate = change.maxBitrate ?? current.maxBitrate ?? settings.maxBitrate;
+      const sameStream = sourceId === current.mediaSourceId && maxBitrate === current.maxBitrate;
+      let choice: StreamChoice = { audio: change.audio ?? current.audioIndex ?? -1, subtitle: change.subtitle ?? current.subtitleIndex ?? -1 };
+      const settle = (next: ActivePlayback) => {
+        activeRef.current = next;
+        setActive(next);
+        void report(next, "progress", positionRef.current, pausedRef.current);
+      };
+
+      // Text subtitles are drawn by the player, so they change in place unless
+      // a burned-in one has to come out of the video.
+      if (sameStream && choice.audio === current.audioIndex && !current.burnIn && !burnsIn(current.streams, choice.subtitle)) {
+        const source = { Id: current.mediaSourceId, MediaStreams: current.streams } as MediaSource;
+        await webSubtitle(textSubtitle(client, current.item.Id, source, choice.subtitle, false) ?? null);
+        settle({ ...current, subtitleIndex: choice.subtitle });
+        return;
+      }
+      // A direct-played file may carry every audio track the browser can switch between.
+      if (sameStream && choice.subtitle === current.subtitleIndex && current.method !== "Transcode") {
+        const audio = audioStreams(current.streams).filter((stream) => !stream.IsExternal);
+        const ordinal = audio.findIndex((stream) => stream.Index === choice.audio);
+        if (ordinal >= 0 && webAudioTrack(ordinal, audio.length)) {
+          settle({ ...current, audioIndex: choice.audio, audioCodec: audio[ordinal].Codec });
+          return;
+        }
+      }
+
+      // Otherwise the server starts a new stream with those tracks, from here.
+      const position = positionRef.current;
+      const wasPaused = pausedRef.current;
+      const startTicks = secondsToTicks(position);
+      const sameSource = sourceId === current.mediaSourceId;
+      const info = await client.playbackInfo(current.item.Id, {
+        startTicks,
+        mediaSourceId: sourceId,
+        audioIndex: sameSource ? choice.audio : undefined,
+        subtitleIndex: sameSource ? choice.subtitle : undefined,
+        maxBitrate,
+      });
+      const source = sourceOf(info.MediaSources ?? [], sourceId);
+      if (!source) throw new Error("Jellyfin did not return a media source.");
+      if (!sameSource) choice = initialStreams(source, settings);
+      const stream = await webStream(client, current.item, info, source, choice, maxBitrate, startTicks);
+      if (activeRef.current !== current) return;
+      const video = stream.source.MediaStreams?.find((candidate) => candidate.Type === "Video");
+      const next: ActivePlayback = {
+        ...current,
+        playSessionId: stream.info.PlaySessionId,
+        mediaSourceId: stream.source.Id,
+        method: stream.method,
+        badge: streamBadge(stream.source),
+        videoCodec: video?.Codec,
+        height: video?.Height,
+        liveStreamId: stream.source.LiveStreamId ?? undefined,
+        ...streamsOf(stream.source, choice, stream.burn, maxBitrate),
+      };
+      const subtitle = textSubtitle(client, current.item.Id, stream.source, choice.subtitle, stream.burn);
+      const replay: PlayRequest = {
+        ...request,
+        url: stream.url,
+        startSeconds: position,
+        playbackSpeed: volumeRef.current.rate,
+        badge: next.badge,
+        subtitles: subtitle ? [subtitle] : undefined,
+      };
+      requestRef.current = replay;
+      activeRef.current = next;
+      setActive(next);
+      await playerPlay(replay);
+      if (wasPaused) await playerRequest(["set_property", "pause", true]);
+      if (current.method === "Transcode" && current.playSessionId !== next.playSessionId) void client.stopEncoding(current.playSessionId).catch(() => {});
+      sentRef.current = { ...sentRef.current, paused: wasPaused, position, at: Date.now() };
+      void report(next, "progress", position, wasPaused);
+    },
+    [client, report],
+  );
 
   const pauseTo = useCallback(async (next: boolean) => {
     await playerRequest(["set_property", "pause", next]);
@@ -699,8 +869,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       },
       mini,
       setMini,
+      changeStreams,
     }),
-    [active, busy, error, play, stop, togglePause, seek, pauseTo, mini, setMini],
+    [active, busy, error, play, stop, togglePause, seek, pauseTo, mini, setMini, changeStreams],
   );
   const clock = useMemo<PlaybackClock>(() => ({ position, duration, paused, finished }), [position, duration, paused, finished]);
 

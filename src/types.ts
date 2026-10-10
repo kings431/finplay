@@ -17,7 +17,9 @@ export type MediaStream = {
   Width?: number;
   Channels?: number;
   IsDefault?: boolean;
+  IsForced?: boolean;
   IsExternal?: boolean;
+  IsTextSubtitleStream?: boolean;
   /** "External" when the server hands this subtitle over as its own file. */
   DeliveryMethod?: string;
   DeliveryUrl?: string;
@@ -213,6 +215,32 @@ export type PlayerEvent = {
   volume: number;
   muted: boolean;
   rate: number;
+  /** Desktop player, only with `reason: "error"`. Log lines are already redacted. */
+  diagnostics?: PlayerDiagnostics;
+};
+
+export type PlayerDiagnostics = {
+  endReason: string;
+  /** mpv's error string for the end-file event, e.g. "loading failed". */
+  fileError: string;
+  /** mpv's newest warnings and errors. */
+  log: string[];
+  hwdec: string;
+  videoCodec: string;
+  fileFormat: string;
+  position: number;
+  duration: number;
+  /** Seconds since this mpv was started. */
+  sinceLoad: number;
+  seeking: boolean;
+  /** Restarted to enter or leave fullscreen. */
+  restart: boolean;
+  httpStatus: string;
+  /** Seconds since the app started. */
+  uptime: number;
+  engine: string;
+  embedded: boolean;
+  handoff: boolean;
 };
 
 export type MpvTrack = {

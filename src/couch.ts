@@ -14,8 +14,13 @@ let enabled = false;
 let frame = 0;
 const held: Record<string, number> = {};
 
-/** Smooth scrolling repaints the page for every step, which a TV's CPU can't keep up with. */
-const SCROLL: ScrollBehavior = tv ? "auto" : "smooth";
+/** A held key moves focus at most this often, so it steps rather than races
+ * and a slow TV never works through a backlog of repeats after release. */
+const REPEAT_MS = 120;
+let lastMove = 0;
+
+/** Where a focused row's top sits, as a share of the page's height. */
+const ROW_TOP = 0.12;
 
 /** Card rows hold most of a page's controls. A Home `.row` is measured as a
  * whole: its own box is laid out even while content-visibility skips what is inside. */
@@ -126,30 +131,79 @@ function pick(from: Element, direction: Direction) {
   return (level ?? best)?.element ?? null;
 }
 
-/** One smooth scroll per container: two at once on the page cancel each other
- * and focus ends up off screen. */
+type Axis = "left" | "top";
+type Glide = { axis: Axis; from: number; to: number; start: number; duration: number };
+
+/** A TV's native smooth scroll runs long and can't be retargeted, so presses
+ * there glide in short eased steps; a press mid-glide carries on from where
+ * the last one got to. */
+const GLIDE_MS = 220;
+const RETARGET_MS = 160;
+const glides = new Map<HTMLElement, Glide>();
+let gliding = 0;
+
+const ease = (t: number) => 1 - (1 - t) ** 3;
+
+function stepGlides(now: number) {
+  gliding = 0;
+  for (const [element, glide] of glides) {
+    if (!glide.start) glide.start = now;
+    const t = Math.min(1, (now - glide.start) / glide.duration);
+    const at = Math.round(glide.from + (glide.to - glide.from) * ease(t));
+    if (glide.axis === "left") element.scrollLeft = at;
+    else element.scrollTop = at;
+    if (t >= 1 || !element.isConnected) glides.delete(element);
+  }
+  if (glides.size) gliding = requestAnimationFrame(stepGlides);
+}
+
+/** One scroll per container: two at once on the page cancel each other and
+ * focus ends up off screen. */
+function glideTo(element: HTMLElement, axis: Axis, to: number) {
+  const max = axis === "left" ? element.scrollWidth - element.clientWidth : element.scrollHeight - element.clientHeight;
+  const target = Math.round(Math.max(0, Math.min(max, to)));
+  if (!tv) {
+    element.scrollTo({ [axis]: target, behavior: "smooth" });
+    return;
+  }
+  const running = glides.get(element);
+  if (running?.to === target) return;
+  const from = axis === "left" ? element.scrollLeft : element.scrollTop;
+  if (!running && Math.abs(target - from) < 1) return;
+  glides.set(element, { axis, from, to: target, start: 0, duration: running ? RETARGET_MS : GLIDE_MS });
+  if (!gliding) gliding = requestAnimationFrame(stepGlides);
+}
+
+/**
+ * Scrolls by a fixed rule rather than just enough, so the screen moves the
+ * same way on every press: a card lines up where its row's first card starts,
+ * and a row of cards sits at the same height on the page.
+ */
 function focus(element: HTMLElement) {
   element.focus({ preventScroll: true });
-  const main = document.querySelector(".main");
+  const main = document.querySelector<HTMLElement>(".main");
   if (!main?.contains(element)) {
     element.scrollIntoView({ block: "nearest", inline: "nearest" });
     return;
   }
   const rect = element.getBoundingClientRect();
-  const track = element.closest(".row-track");
-  if (track) {
-    const lane = track.getBoundingClientRect();
-    const edge = 56;
-    if (rect.left < lane.left + edge) track.scrollBy({ left: rect.left - lane.left - edge, behavior: SCROLL });
-    else if (rect.right > lane.right - edge) track.scrollBy({ left: rect.right - lane.right + edge, behavior: SCROLL });
-  }
+  const track = element.closest<HTMLElement>(".row-track");
+  const lead = track?.firstElementChild;
+  if (track && lead) glideTo(track, "left", rect.left - lead.getBoundingClientRect().left);
   const view = main.getBoundingClientRect();
+  const row = element.closest(".row");
   let top: number | null = null;
+  if (row) {
+    const box = row.getBoundingClientRect();
+    const offset = main.scrollTop + box.top - view.top;
+    // A row that fits on the first screen keeps the page at its top.
+    top = offset + box.height <= view.height ? 0 : offset - view.height * ROW_TOP;
+  }
   // Nothing above it: show the page from the very top, hero included.
-  if (!pick(element, "up")) top = 0;
+  else if (!pick(element, "up")) top = 0;
   else if (rect.top < view.top + 80) top = main.scrollTop + rect.top - view.top - 120;
   else if (rect.bottom > view.bottom - 40) top = main.scrollTop + rect.bottom - view.bottom + 120;
-  if (top !== null) main.scrollTo({ top: Math.max(0, top), behavior: SCROLL });
+  if (top !== null) glideTo(main, "top", top);
 }
 
 const IN_MAIN = FOCUSABLE.split(", ")
@@ -197,7 +251,8 @@ export function move(direction: Direction) {
   const next = entering ?? (inScope ? pick(current, direction) : first());
   if (next) focus(next);
   else if (inScope && direction === "up" && region(current)?.matches(".main")) {
-    document.querySelector(".main")?.scrollTo({ top: 0, behavior: SCROLL });
+    const main = document.querySelector<HTMLElement>(".main");
+    if (main) glideTo(main, "top", 0);
   }
 }
 
@@ -215,12 +270,18 @@ function cycle(select: HTMLSelectElement, direction: Direction) {
 
 /** Up and down always leave a dropdown; opening it would trap them in its list. */
 function navigate(direction: Direction, repeated: boolean) {
+  if (repeated && performance.now() - lastMove < REPEAT_MS) return;
   const current = document.activeElement;
   if (current instanceof HTMLSelectElement && (direction === "left" || direction === "right")) {
     // Past the last option a fresh press moves on; holding the key stops at the end.
-    if (cycle(current, direction) || repeated) return;
+    if (cycle(current, direction) || repeated) {
+      lastMove = performance.now();
+      return;
+    }
   }
   move(direction);
+  // Timed from when the move is done, so repeats that queued up behind it are dropped.
+  lastMove = performance.now();
 }
 
 function back() {
@@ -274,7 +335,7 @@ function repeat(key: string, pressed: boolean, action: (repeated: boolean) => vo
     held[key] = repeats ? now + 380 : Number.POSITIVE_INFINITY;
     action(false);
   } else if (now >= since) {
-    held[key] = now + 110;
+    held[key] = now + REPEAT_MS;
     action(true);
   }
 }

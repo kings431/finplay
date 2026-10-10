@@ -22,12 +22,14 @@ const Login = lazy(() => import("./pages/Login").then((page) => ({ default: page
 const Discover = lazy(() => import("./pages/Discover").then((page) => ({ default: page.Discover })));
 const DiscoverList = lazy(() => import("./pages/Discover").then((page) => ({ default: page.DiscoverList })));
 const Stats = lazy(() => import("./pages/Stats").then((page) => ({ default: page.Stats })));
+const Dashboard = lazy(() => import("./pages/Dashboard").then((page) => ({ default: page.Dashboard })));
 const Person = lazy(() => import("./pages/Person").then((page) => ({ default: page.Person })));
 const Requests = lazy(() => import("./pages/Requests").then((page) => ({ default: page.Requests })));
 const LiveTv = lazy(() => import("./pages/LiveTv").then((page) => ({ default: page.LiveTv })));
 const Together = lazy(() => import("./pages/Together").then((page) => ({ default: page.Together })));
 const Settings = lazy(() => import("./pages/Settings").then((page) => ({ default: page.Settings })));
 import { Mark } from "./icons";
+import { tv } from "./tv";
 
 function Splash() {
   return (
@@ -80,7 +82,8 @@ export function App() {
                         <Route path="/livetv" element={<LiveTv />} />
                         <Route path="/together" element={<Together />} />
                         <Route path="/downloads" element={<Downloads />} />
-                        <Route path="/stats" element={<Stats />} />
+                        <Route path="/stats" element={tv ? <Stats /> : <Navigate to="/dashboard/stats" replace />} />
+                        <Route path="/dashboard/:section?" element={<Dashboard />} />
                         <Route path="/person/:id" element={<Person />} />
                         <Route path="/settings" element={<Settings />} />
                         <Route path="/playing/:id" element={<Playing />} />

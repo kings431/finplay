@@ -4,6 +4,7 @@
  */
 import { inTauri } from "./player";
 import { loadSettings } from "./settings";
+import type { PlayerEvent } from "./types";
 
 /** Offline servers and cancelled requests are not bugs. */
 const NOISE = /Failed to fetch|NetworkError|Load failed|AbortError|aborted|ResizeObserver loop|The user aborted/i;
@@ -27,10 +28,12 @@ function describe(error: unknown) {
   }
 }
 
-export function reportCrash(kind: string, error: unknown, context = "") {
+export function reportCrash(kind: string, error: unknown, context = "", details = "") {
   if (!inTauri() || !loadSettings().crashReports) return;
-  const { message, stack } = describe(error);
-  if (!message || NOISE.test(message)) return;
+  const described = describe(error);
+  const { message } = described;
+  const stack = details || described.stack;
+  if (!message || (!details && NOISE.test(message))) return;
   const where = window.location.hash.split("?")[0] || "#/";
   const report = {
     kind,
@@ -41,6 +44,79 @@ export function reportCrash(kind: string, error: unknown, context = "") {
   void import("@tauri-apps/api/core")
     .then(({ invoke }) => invoke("crash_report", { report }))
     .catch(() => {});
+}
+
+/** The last thing that changed what plays, to tell what a failure followed. */
+export type PlaybackAction = { kind: "start" | "seek" | "auto-next" | "stop"; at: number };
+
+export type FailedPlayback = {
+  method: string;
+  badge: string;
+  videoCodec?: string;
+  audioCodec?: string;
+  /** Episode, Movie, … — never the title. */
+  itemType?: string;
+};
+
+const NETWORK = /\b(http|tcp|tls|ssl|connection|connect|timed? ?out|resolve|network|stream_callback)\b/i;
+
+function clock(seconds: number) {
+  const total = Math.max(0, Math.round(seconds || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
+}
+
+function trigger(event: PlayerEvent, action: PlaybackAction, now: number) {
+  const info = event.diagnostics;
+  const ago = (now - action.at) / 1000;
+  const position = info?.position ?? event.time;
+  const duration = info?.duration || event.duration;
+  if (info?.restart) return "stream restart (fullscreen switch)";
+  if (info?.seeking || (action.kind === "seek" && ago < 10)) return "seek";
+  if (action.kind === "auto-next" && ago < 30) return "auto-next";
+  if (duration > 0 && position > duration - 20) return "end of file";
+  if ((info?.sinceLoad ?? ago) < 15 || position < 3) return "start";
+  return "mid-playback";
+}
+
+/** A desktop player failure, with mpv's reason, recent log and playback state. */
+export function reportPlaybackFailure(event: PlayerEvent, playback: FailedPlayback, action: PlaybackAction) {
+  const now = Date.now();
+  // Ending playback is not a failure, whatever mpv logs while it shuts down.
+  if (action.kind === "stop" && now - action.at < 5000) return;
+  const info = event.diagnostics;
+  const log = info?.log ?? [];
+  const lastError = [...log].reverse().find((line) => /\] (error|fatal):/.test(line));
+  const message = info?.fileError || lastError || event.detail || "mpv ended playback with an error but gave no reason";
+  const network = info?.httpStatus ? `HTTP ${info.httpStatus}` : log.some((line) => NETWORK.test(line) && /\] (error|fatal):/.test(line)) ? "network error in log" : "";
+  const context = [
+    playback.method,
+    playback.badge,
+    `${playback.videoCodec ?? "?"}/${playback.audioCodec ?? "?"}`,
+    playback.itemType ?? "item",
+    `trigger ${trigger(event, action, now)}`,
+    `at ${clock(info?.position ?? event.time)} of ${clock(info?.duration || event.duration)}`,
+    info ? `${Math.round(info.sinceLoad)}s after load` : "",
+    network,
+    info ? `hwdec ${info.hwdec || "none"}` : "",
+    info?.videoCodec ? `decoder ${info.videoCodec}` : "",
+    info?.fileFormat ? `demuxer ${info.fileFormat}` : "",
+    info ? `${info.engine}${info.handoff ? " fullscreen window" : info.embedded ? " embedded" : ""}` : "",
+    info?.restart ? "stream restart" : "",
+    info ? `uptime ${clock(info.uptime)}` : "",
+  ].filter(Boolean).join(" · ");
+  // The webhook keeps the start of this text, so keep the newest lines that fit.
+  const lines: string[] = [];
+  let size = 0;
+  for (const line of [...log].reverse()) {
+    size += line.length + 1;
+    if (size > 2600) break;
+    lines.unshift(line);
+  }
+  const details = [`end-file reason=${info?.endReason || event.reason}${info?.fileError ? ` error="${info.fileError}"` : ""}`, ...(lines.length ? ["mpv log (warn+):", ...lines] : ["mpv log: (nothing at warn level)"])].join("\n");
+  reportCrash("Playback failed", message, context, details);
 }
 
 export function setCrashReporting(enabled: boolean) {
