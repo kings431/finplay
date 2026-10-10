@@ -687,6 +687,10 @@ fn start_player(
     let mut made_fullscreen = false;
     if let Some(wid) = wid {
         args.push(format!("--wid={wid}"));
+        // Once the child is enabled it receives clicks. Leave dragging off so a
+        // press on the picture does not move that child out of the window.
+        #[cfg(windows)]
+        args.push("--window-dragging=no".into());
         // Embedded on Linux means presenting through XWayland. Vulkan swapchains
         // there have frozen the whole desktop on NVIDIA, so use EGL, and prefer
         // NVDEC over VA-API wrappers such as libva-nvidia-driver.
@@ -888,6 +892,13 @@ fn start_player(
             rate: speed,
         },
     );
+    // Windows only. macOS draws through libmpv above the page, and on Linux the
+    // X11 window is already stacked above WebKit. Here mpv's child is created
+    // behind WebView2, so the picture never appears until it is raised.
+    #[cfg(windows)]
+    if let Some(host) = wid {
+        embed::keep_visible(host, Arc::clone(&shared));
+    }
     Ok(())
 }
 
@@ -1097,6 +1108,9 @@ fn emit_status(app: &AppHandle, shared: &Shared, probe: &PlaybackProbe) {
 }
 
 fn emit_closed(app: &AppHandle, shared: &Arc<Shared>, probe: &PlaybackProbe, reason: &str) {
+    // The Windows embed keeper holds its own copy of `shared` and exits on this.
+    #[cfg(windows)]
+    shared.stop.store(true, Ordering::SeqCst);
     shared.awake.set(false);
     if !shared.suppress_close.load(Ordering::SeqCst) {
         mpris(app, Update::Stopped);
@@ -1229,4 +1243,107 @@ fn split_stream(stream: IpcStream) -> Result<(Box<dyn Write + Send>, BufReader<B
         .try_clone()
         .map_err(|err| format!("Could not connect to mpv: {err}"))?;
     Ok((Box::new(stream.0), BufReader::new(Box::new(reader))))
+}
+
+/// Keeps mpv's embedded child visible on Windows.
+///
+/// `--wid` parents an `mpv` HWND to Finplay's window, but WebView2 is an
+/// opaque sibling drawn later, so it covers the video for the whole playback.
+/// mpv also creates that child disabled, which makes clicks fall through to
+/// the page underneath. Raise the player above the webview (still under
+/// Tauri's resize borders) and enable it, and keep doing that: navigating to
+/// the playing page makes WebView2 jump back to the top.
+#[cfg(windows)]
+mod embed {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::Shared;
+
+    const GW_CHILD: u32 = 5;
+    const GW_HWNDNEXT: u32 = 2;
+    const GWL_STYLE: i32 = -16;
+    const WS_DISABLED: u32 = 0x0800_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const HWND_TOP: isize = 0;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindow(hwnd: isize, cmd: u32) -> isize;
+        fn GetClassNameW(hwnd: isize, buf: *mut u16, max_count: i32) -> i32;
+        fn SetWindowPos(hwnd: isize, insert_after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, new_long: isize) -> isize;
+        fn EnableWindow(hwnd: isize, enable: i32) -> i32;
+    }
+
+    pub fn keep_visible(host: i64, shared: Arc<Shared>) {
+        let host = host as isize;
+        thread::spawn(move || {
+            while !shared.stop.load(Ordering::Relaxed) {
+                raise(host);
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+    }
+
+    fn raise(host: isize) {
+        let kids = children(host);
+        let Some(player) = kids.iter().find(|(_, class)| class == "mpv").map(|(hwnd, _)| *hwnd) else {
+            return;
+        };
+        let insert_after = kids
+            .iter()
+            .find(|(_, class)| class == "TAURI_DRAG_RESIZE_BORDERS")
+            .map(|(hwnd, _)| *hwnd)
+            .unwrap_or(HWND_TOP);
+        if !placed(&kids, player, insert_after) {
+            unsafe {
+                SetWindowPos(player, insert_after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        let style = unsafe { GetWindowLongPtrW(player, GWL_STYLE) } as u32;
+        if style & WS_DISABLED != 0 {
+            unsafe {
+                SetWindowLongPtrW(player, GWL_STYLE, (style & !WS_DISABLED) as isize);
+                EnableWindow(player, 1);
+            }
+        }
+    }
+
+    /// Direct children, front to back.
+    fn children(parent: isize) -> Vec<(isize, String)> {
+        let mut out = Vec::new();
+        let mut hwnd = unsafe { GetWindow(parent, GW_CHILD) };
+        while hwnd != 0 && out.len() < 32 {
+            out.push((hwnd, class_name(hwnd)));
+            hwnd = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
+        }
+        out
+    }
+
+    fn class_name(hwnd: isize) -> String {
+        let mut buf = [0u16; 64];
+        let len = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len <= 0 {
+            return String::new();
+        }
+        OsString::from_wide(&buf[..len as usize]).to_string_lossy().into_owned()
+    }
+
+    fn placed(kids: &[(isize, String)], player: isize, insert_after: isize) -> bool {
+        if insert_after == HWND_TOP {
+            return kids.first().is_some_and(|(hwnd, _)| *hwnd == player);
+        }
+        let Some(index) = kids.iter().position(|(hwnd, _)| *hwnd == insert_after) else {
+            return false;
+        };
+        kids.get(index + 1).is_some_and(|(hwnd, _)| *hwnd == player)
+    }
 }

@@ -400,6 +400,10 @@ button.nav-btn { border: 0; background: none; }
 }
 .hero-carousel:hover .hero-nav,
 .hero-carousel:focus-within .hero-nav { opacity: 1; }
+/* Windows has no trackpad swipe, so the highlight arrows stay visible.
+   Mac keeps the horizontal gesture and does not show these buttons. */
+.platform-windows .hero-nav { opacity: 1; }
+.platform-mac .hero-nav { display: none; }
 .hero-nav:hover { background: rgba(0, 0, 0, 0.65); }
 .hero-prev { left: 16px; }
 .hero-next { right: 16px; }
@@ -465,6 +469,10 @@ button.nav-btn { border: 0; background: none; }
 }
 .row-nav:hover svg { background: var(--fg); color: var(--bg); transform: scale(1.08); }
 .row-scroller:hover .row-nav { opacity: 1; }
+/* Same as the highlight arrows: a mouse cannot side-scroll these rows.
+   Mac scrolls them with the trackpad and does not show the buttons. */
+.platform-windows .row-nav { opacity: 1; }
+.platform-mac .row-nav { display: none; }
 .row-nav.hidden { opacity: 0 !important; pointer-events: none; }
 .row-nav.left { left: 6px; }
 .row-nav.right { right: 6px; }
