@@ -1,15 +1,17 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-/** Tizen loads the app from local files, where module scripts are refused, so
- * the TV build is one classic script. */
+/** Tizen loads the app from local files, where module scripts and CORS-mode
+ * requests are refused, so the TV build is one classic script and a plain
+ * stylesheet link. */
 function classicScript(): Plugin {
   return {
     name: "finplay-classic-script",
     apply: "build",
     transformIndexHtml: {
       order: "post",
-      handler: (html) => html.replace(/<script type="module" crossorigin/g, "<script defer"),
+      handler: (html) =>
+        html.replace(/<script type="module" crossorigin/g, "<script defer").replace(/<link rel="stylesheet" crossorigin/g, '<link rel="stylesheet"'),
     },
   };
 }
@@ -38,6 +40,9 @@ export default defineConfig(({ mode }) => {
           outDir: "dist-tv",
           sourcemap: false,
           modulePreload: false,
+          // Tizen's default content policy refuses injected <style> tags, so
+          // the CSS ships as its own file.
+          cssCodeSplit: false,
           rollupOptions: { output: { format: "iife", inlineDynamicImports: true } },
         }
       : {

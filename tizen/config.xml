@@ -2,6 +2,7 @@
 <widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="https://finplay.app/tv" version="{{VERSION}}" viewmodes="maximized">
     <access origin="*" subdomains="true"/>
     <tizen:allow-navigation>*</tizen:allow-navigation>
+    <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http: https: data: blob:; media-src 'self' http: https: data: blob:; connect-src 'self' http: https: ws: wss: data: blob:; font-src 'self' data:; object-src 'none'</tizen:content-security-policy>
     <tizen:application id="{{PACKAGE}}.{{APP}}" package="{{PACKAGE}}" required_version="4.0"/>
     <content src="index.html"/>
     <feature name="http://tizen.org/feature/screen.size.normal.1080.1920"/>
