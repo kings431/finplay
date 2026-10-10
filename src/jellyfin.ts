@@ -360,6 +360,57 @@ export class Jellyfin {
     return this.send(favorite ? "POST" : "DELETE", `/UserFavoriteItems/${itemId}?userId=${this.auth.userId}`);
   }
 
+  /** This user's playlists; Jellyfin keeps them private unless shared. */
+  playlists() {
+    const params = new URLSearchParams({
+      IncludeItemTypes: "Playlist",
+      Recursive: "true",
+      SortBy: "SortName",
+      Fields: "ChildCount,DateCreated,CumulativeRunTimeTicks",
+      EnableImageTypes: "Primary,Thumb,Backdrop",
+      ImageTypeLimit: "1",
+    });
+    return this.json<ItemList>(`/Users/${this.auth.userId}/Items?${params}`);
+  }
+
+  /** Entries in order. Each carries a `PlaylistItemId` for moving and removing it. */
+  playlistItems(playlistId: string) {
+    const params = new URLSearchParams({
+      UserId: this.auth.userId,
+      Fields: "RunTimeTicks,PrimaryImageAspectRatio,ProductionYear",
+      EnableImageTypes: "Primary,Thumb,Backdrop",
+      ImageTypeLimit: "1",
+      EnableUserData: "true",
+    });
+    return this.json<ItemList>(`/Playlists/${playlistId}/Items?${params}`);
+  }
+
+  createPlaylist(name: string, ids: string[]) {
+    return this.json<{ Id: string }>("/Playlists", { Name: name, Ids: ids, UserId: this.auth.userId, IsPublic: false });
+  }
+
+  /** A series or season adds every episode in it. */
+  async addToPlaylist(playlistId: string, ids: string[]) {
+    const params = new URLSearchParams({ Ids: ids.join(","), UserId: this.auth.userId });
+    await this.send("POST", `/Playlists/${playlistId}/Items?${params}`);
+  }
+
+  async removeFromPlaylist(playlistId: string, entryIds: string[]) {
+    await this.send("DELETE", `/Playlists/${playlistId}/Items?${new URLSearchParams({ EntryIds: entryIds.join(",") })}`);
+  }
+
+  async movePlaylistItem(playlistId: string, entryId: string, index: number) {
+    await this.send("POST", `/Playlists/${playlistId}/Items/${entryId}/Move/${index}`);
+  }
+
+  async renamePlaylist(playlistId: string, name: string) {
+    await this.send("POST", `/Playlists/${playlistId}`, { Name: name });
+  }
+
+  async deletePlaylist(playlistId: string) {
+    await this.send("DELETE", `/Items/${playlistId}`);
+  }
+
   setPlayed(itemId: string, played: boolean) {
     return this.send(played ? "POST" : "DELETE", `/UserPlayedItems/${itemId}?userId=${this.auth.userId}`);
   }

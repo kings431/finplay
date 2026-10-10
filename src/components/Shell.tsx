@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useDownloads } from "../downloads";
-import { IconChart, IconCompass, IconDownload, IconFilm, IconGrid, IconHome, IconLive, IconSearch, IconSettings, IconTv, IconUsers, Mark } from "../icons";
+import { IconChart, IconCompass, IconDownload, IconFilm, IconGrid, IconHome, IconLive, IconPlaylist, IconSearch, IconSettings, IconTv, IconUsers, Mark } from "../icons";
 import { userImageUrl } from "../media";
 import { usePlayback } from "../playback";
 import { useSession } from "../session";
@@ -142,6 +142,10 @@ export function Shell() {
               <NavLink to="/libraries" className={link}>
                 <IconGrid />
                 <span>Library</span>
+              </NavLink>
+              <NavLink to="/playlists" className={({ isActive }) => link({ isActive: isActive || location.pathname.startsWith("/playlist/") })}>
+                <IconPlaylist />
+                <span>Playlists</span>
               </NavLink>
               <NavLink to="/discover" className={link}>
                 <IconCompass />

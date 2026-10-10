@@ -15,7 +15,7 @@ export function Libraries() {
         {views.map((view) => {
           const art = primaryUrl(session, view);
           return (
-            <button key={view.Id} className="library-card" onClick={() => navigate(view.CollectionType === "livetv" ? "/livetv" : `/library/${view.Id}`)}>
+            <button key={view.Id} className="library-card" onClick={() => navigate(view.CollectionType === "livetv" ? "/livetv" : view.CollectionType === "playlists" ? "/playlists" : `/library/${view.Id}`)}>
               <span style={{ background: tile(view.Name) }}>{art ? <img src={art} alt="" loading="lazy" decoding="async" /> : null}</span>
               <strong>{view.Name}</strong>
             </button>

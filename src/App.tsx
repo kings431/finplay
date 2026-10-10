@@ -8,6 +8,8 @@ import { Home } from "./pages/Home";
 import { Libraries } from "./pages/Libraries";
 import { Library } from "./pages/Library";
 import { Detail } from "./pages/Detail";
+import { Playlists } from "./pages/Playlists";
+import { Playlist } from "./pages/Playlist";
 import { Search } from "./pages/Search";
 import { Downloads } from "./pages/Downloads";
 import { SyncPlayProvider } from "./syncplay";
@@ -69,6 +71,8 @@ export function App() {
                         <Route path="/libraries" element={<Libraries />} />
                         <Route path="/library/:id" element={<Library />} />
                         <Route path="/item/:id" element={<Detail />} />
+                        <Route path="/playlists" element={<Playlists />} />
+                        <Route path="/playlist/:id" element={<Playlist />} />
                         <Route path="/search" element={<Search />} />
                         <Route path="/discover" element={<Discover />} />
                         <Route path="/discover/:slug" element={<DiscoverList />} />

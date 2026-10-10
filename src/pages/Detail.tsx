@@ -17,6 +17,7 @@ import {
 } from "../media";
 import { Poster, Scroller } from "../components/Cards";
 import { DownloadButton, SeasonDownload, UnwatchedDownload } from "../components/DownloadButton";
+import { AddToPlaylist } from "../components/AddToPlaylist";
 import { downloadImage, useDownloads } from "../downloads";
 import { usePlayback, type PlayOptions } from "../playback";
 import { useSyncPlay } from "../syncplay";
@@ -302,6 +303,7 @@ export function Detail() {
                 <button className={`btn-round ${isPlayed ? "on-check" : ""}`} onClick={() => void markPlayed(item, !isPlayed)} aria-label="Watched" title={isPlayed ? "Mark unwatched" : "Mark watched"}>
                   <IconCheck size={19} />
                 </button>
+                {item.Type === "Movie" || item.Type === "Episode" || item.Type === "Series" || item.Type === "Season" ? <AddToPlaylist item={item} /> : null}
                 {item.Type === "Movie" || item.Type === "Episode" ? <DownloadButton item={item} mediaSourceId={sourceId || undefined} /> : null}
                 <TrailerButton item={item} />
               </>

@@ -24,6 +24,39 @@ export function IconCast({ size }: IconProps) {
   );
 }
 
+export function IconPlaylist({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 6.5h11M4 11.5h11M4 16.5h6.5" />
+      <path d="M15.5 14.2v5.3l4.5-2.65z" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconPlus({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+export function IconUp({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="m6 14 6-6 6 6" />
+    </svg>
+  );
+}
+
+export function IconDown({ size }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="m6 10 6 6 6-6" />
+    </svg>
+  );
+}
+
 export function IconStop({ size }: IconProps) {
   return (
     <svg {...base(size)}>

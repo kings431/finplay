@@ -76,6 +76,8 @@ export type PlayOptions = {
   trailerUrl?: string;
   /** Plays here even while another device is chosen to play on. */
   local?: boolean;
+  /** What plays after this, in order, instead of the next episode (a playlist). */
+  queue?: BaseItem[];
 };
 
 type ResumeAsk = { item: BaseItem; seconds: number; resolve: (choice: "resume" | "start" | null) => void };
@@ -134,6 +136,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   /** What the server last heard, to report changes as they happen. */
   const sentRef = useRef({ paused: false, position: 0, at: 0, volume: 100, muted: false });
   const nextRef = useRef<BaseItem | null>(null);
+  const queueRef = useRef<BaseItem[] | undefined>(undefined);
   const playRef = useRef<(item: BaseItem, options?: PlayOptions) => Promise<void>>(async () => {});
   const [resumeAsk, setResumeAsk] = useState<ResumeAsk | null>(null);
   navigateRef.current = navigate;
@@ -266,7 +269,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       const next = nextRef.current;
       if (!next || !activeRef.current) return;
       nextRef.current = null;
-      void finish(false).then(() => playRef.current(next, { resume: true }));
+      const queue = queueRef.current;
+      void finish(false).then(() => playRef.current(next, { resume: true, queue }));
     }).then((stopListening) => {
       if (cancel) stopListening();
       else unlistenNext = stopListening;
@@ -325,6 +329,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         },
       ) => {
         nextRef.current = media.next ?? null;
+        queueRef.current = options?.queue?.slice(1);
         stopSent.current = false;
         positionRef.current = startSeconds;
         activeRef.current = playback;
@@ -470,9 +475,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         const chosen = options?.startAt ?? (await chooseStart(target.item, options?.fromStart ? 0 : ticksToSeconds(target.ticks)));
         if (chosen === null) return;
         const startTicks = secondsToTicks(chosen);
+        const queued = options?.queue?.[0];
         const extras = Promise.all([
           client.segments(target.item.Id),
-          settings.autoplayNext ? client.nextEpisode(target.item).catch(() => undefined) : Promise.resolve(undefined),
+          queued ? Promise.resolve(queued) : settings.autoplayNext ? client.nextEpisode(target.item).catch(() => undefined) : Promise.resolve(undefined),
         ]);
         let info = await client.playbackInfo(target.item.Id, {
           startTicks: 0,

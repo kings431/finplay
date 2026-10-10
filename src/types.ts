@@ -66,6 +66,10 @@ export type BaseItem = {
   CriticRating?: number;
   OfficialRating?: string;
   ChildCount?: number;
+  /** Total runtime of a playlist or collection. */
+  CumulativeRunTimeTicks?: number;
+  /** This entry's place in a playlist; the same title can appear twice. */
+  PlaylistItemId?: string;
   Status?: string;
   PremiereDate?: string;
   EndDate?: string;
