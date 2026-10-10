@@ -16,7 +16,7 @@ use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -458,7 +458,39 @@ fn attach(app: &AppHandle, player: usize) {
     }
 }
 
+/// Finplay's Dock icon when it is not running from an app bundle (dev builds).
+static APP_ICON: AtomicUsize = AtomicUsize::new(0);
+
+/// Records the Dock icon so `restore_app_icon` can put it back. Call at startup.
+pub fn remember_app_icon(app: &AppHandle) {
+    let _ = app.run_on_main_thread(|| unsafe {
+        let shared: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        let icon: *mut AnyObject = msg_send![shared, applicationIconImage];
+        if !icon.is_null() {
+            let copy: *mut AnyObject = msg_send![icon, copy];
+            APP_ICON.store(copy as usize, Ordering::Relaxed);
+        }
+    });
+}
+
+/// mpv swaps the Dock icon for its own each time it sets up a video window
+/// (unless MPVBUNDLE=true, which also rewrites PATH) and never changes it
+/// back. Call on the main thread after mpv has configured its output.
+fn restore_app_icon() {
+    unsafe {
+        let shared: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+        let bundle: *mut AnyObject = msg_send![objc2::class!(NSBundle), mainBundle];
+        let path: *mut AnyObject = msg_send![bundle, bundlePath];
+        let suffix: *mut AnyObject = msg_send![objc2::class!(NSString), stringWithUTF8String: c".app".as_ptr()];
+        let bundled: bool = !path.is_null() && msg_send![path, hasSuffix: suffix];
+        // nil makes AppKit fall back to the bundle's icon file.
+        let icon = if bundled { std::ptr::null_mut() } else { APP_ICON.load(Ordering::Relaxed) as *mut AnyObject };
+        let _: () = msg_send![shared, setApplicationIconImage: icon];
+    }
+}
+
 fn detach() {
+    restore_app_icon();
     let attached = ATTACHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     let Some(embed) = attached else { return };
     unsafe {
@@ -692,12 +724,16 @@ impl LibMpv {
                         }
                     }
                     // mpv resizes its own window to suit new video; pull it back over Finplay.
+                    // Its window setup has also replaced the Dock icon by now.
                     MPV_EVENT_VIDEO_RECONFIG => {
                         let app = events_app.clone();
                         std::thread::spawn(move || {
                             for delay in [0, 300] {
                                 std::thread::sleep(Duration::from_millis(delay));
-                                let _ = app.run_on_main_thread(follow_host);
+                                let _ = app.run_on_main_thread(|| {
+                                    restore_app_icon();
+                                    follow_host();
+                                });
                             }
                         });
                     }

@@ -291,20 +291,22 @@ export function Settings() {
             />
           </div>
         )}
-        <div className="setting-row">
-          <div>
-            <strong>Low-power mode</strong>
-            <p>Turns off glass blur effects and uses lighter video scaling. Smoother on older computers and easier on the battery.</p>
+        {tv ? null : (
+          <div className="setting-row">
+            <div>
+              <strong>Low-power mode</strong>
+              <p>Turns off glass blur effects and uses lighter video scaling. Smoother on older computers and easier on the battery.</p>
+            </div>
+            <button
+              className={`switch${settings.lowPower ? " on" : ""}`}
+              onClick={() => {
+                update({ lowPower: !settings.lowPower });
+                applyLowPower(!settings.lowPower);
+              }}
+              aria-pressed={settings.lowPower}
+            />
           </div>
-          <button
-            className={`switch${settings.lowPower ? " on" : ""}`}
-            onClick={() => {
-              update({ lowPower: !settings.lowPower });
-              applyLowPower(!settings.lowPower);
-            }}
-            aria-pressed={settings.lowPower}
-          />
-        </div>
+        )}
         {inTauri() ? (
           <div className="setting-row">
             <div>

@@ -14,11 +14,23 @@ let enabled = false;
 let frame = 0;
 const held: Record<string, number> = {};
 
-function visible(element: Element) {
-  const rect = element.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2) return false;
+/** Smooth scrolling repaints the page for every step, which a TV's CPU can't keep up with. */
+const SCROLL: ScrollBehavior = tv ? "auto" : "smooth";
+
+/** Card rows hold most of a page's controls. A Home `.row` is measured as a
+ * whole: its own box is laid out even while content-visibility skips what is inside. */
+const LANE = ".row, .row-track";
+/** How far a card may sit outside its row's box. */
+const LANE_SLACK = 40;
+
+function shown(element: Element) {
   const style = getComputedStyle(element);
   return style.visibility !== "hidden" && style.display !== "none" && !element.closest("[inert], [aria-hidden='true']");
+}
+
+function visible(element: Element) {
+  const rect = element.getBoundingClientRect();
+  return rect.width >= 2 && rect.height >= 2 && shown(element);
 }
 
 function scope(): ParentNode {
@@ -36,42 +48,80 @@ function region(element: Element) {
   return element.closest(".sidebar, .main");
 }
 
+/**
+ * Measuring every card on a long page takes a TV most of a second, and cards in
+ * rows that content-visibility skipped force those rows to lay out. So each row
+ * is measured once, and skipped whole when nothing in it could beat the best
+ * match so far.
+ */
 function pick(from: Element, direction: Direction) {
   const origin = from.getBoundingClientRect();
   const at = center(origin);
-  const within = direction === "up" || direction === "down" ? region(from) : null;
-  let best: { element: HTMLElement; score: number } | null = null;
+  const horizontal = direction === "left" || direction === "right";
+  const within = horizontal ? null : region(from);
+  const root = scope();
+  type Match = { element: HTMLElement; score: number };
+  let best = null as Match | null;
   // Left and right stay on the same line when they can, so a wide control on
   // the next row never beats buttons further along this one.
-  let level: { element: HTMLElement; score: number } | null = null;
-  for (const element of scope().querySelectorAll<HTMLElement>(FOCUSABLE)) {
-    if (element === from || !visible(element)) continue;
-    if (within && !within.contains(element)) continue;
+  let level = null as Match | null;
+  const consider = (element: HTMLElement) => {
+    if (element === from || (within && !within.contains(element))) return;
     const rect = element.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
     const to = center(rect);
     let primary: number;
     let secondary: number;
     if (direction === "right") {
-      if (to.x <= at.x + 1 || rect.left < origin.left + origin.width / 3) continue;
+      if (to.x <= at.x + 1 || rect.left < origin.left + origin.width / 3) return;
       primary = Math.max(0, rect.left - origin.right);
       secondary = Math.abs(to.y - at.y);
     } else if (direction === "left") {
-      if (to.x >= at.x - 1 || rect.right > origin.right - origin.width / 3) continue;
+      if (to.x >= at.x - 1 || rect.right > origin.right - origin.width / 3) return;
       primary = Math.max(0, origin.left - rect.right);
       secondary = Math.abs(to.y - at.y);
     } else if (direction === "down") {
-      if (to.y <= at.y + 1 || rect.top < origin.top + origin.height / 3) continue;
+      if (to.y <= at.y + 1 || rect.top < origin.top + origin.height / 3) return;
       primary = Math.max(0, rect.top - origin.bottom);
       secondary = Math.abs(to.x - at.x);
     } else {
-      if (to.y >= at.y - 1 || rect.bottom > origin.bottom - origin.height / 3) continue;
+      if (to.y >= at.y - 1 || rect.bottom > origin.bottom - origin.height / 3) return;
       primary = Math.max(0, origin.top - rect.bottom);
       secondary = Math.abs(to.x - at.x);
     }
-    const horizontal = direction === "left" || direction === "right";
+    if (!shown(element)) return;
     const score = primary + secondary * (horizontal ? 2.5 : 0.35);
     if (!best || score < best.score) best = { element, score };
     if (horizontal && rect.top < origin.bottom && rect.bottom > origin.top && (!level || score < level.score)) level = { element, score };
+  };
+  const lanes: { cards: NodeListOf<HTMLElement>; bound: number; level: boolean }[] = [];
+  const inLane = new Set<Element>();
+  for (const lane of root.querySelectorAll<HTMLElement>(LANE)) {
+    if (lane.parentElement?.closest(LANE)) continue;
+    const cards = lane.querySelectorAll<HTMLElement>(FOCUSABLE);
+    cards.forEach((card) => inLane.add(card));
+    if (!cards.length || (within && !within.contains(lane))) continue;
+    const box = lane.getBoundingClientRect();
+    const top = box.top - LANE_SLACK;
+    const bottom = box.bottom + LANE_SLACK;
+    // The lowest score any card in the row could reach.
+    let bound: number;
+    if (direction === "down") {
+      if (bottom <= at.y + 1) continue;
+      bound = Math.max(0, top - origin.bottom);
+    } else if (direction === "up") {
+      if (top >= at.y - 1) continue;
+      bound = Math.max(0, origin.top - bottom);
+    } else {
+      bound = 2.5 * Math.max(0, top - at.y, at.y - bottom);
+    }
+    lanes.push({ cards, bound, level: horizontal && top < origin.bottom && bottom > origin.top });
+  }
+  for (const element of root.querySelectorAll<HTMLElement>(FOCUSABLE)) if (!inLane.has(element)) consider(element);
+  lanes.sort((a, b) => a.bound - b.bound);
+  for (const lane of lanes) {
+    if (lane.level ? level && lane.bound >= level.score : level || (best && lane.bound >= best.score)) continue;
+    lane.cards.forEach(consider);
   }
   return (level ?? best)?.element ?? null;
 }
@@ -90,8 +140,8 @@ function focus(element: HTMLElement) {
   if (track) {
     const lane = track.getBoundingClientRect();
     const edge = 56;
-    if (rect.left < lane.left + edge) track.scrollBy({ left: rect.left - lane.left - edge, behavior: "smooth" });
-    else if (rect.right > lane.right - edge) track.scrollBy({ left: rect.right - lane.right + edge, behavior: "smooth" });
+    if (rect.left < lane.left + edge) track.scrollBy({ left: rect.left - lane.left - edge, behavior: SCROLL });
+    else if (rect.right > lane.right - edge) track.scrollBy({ left: rect.right - lane.right + edge, behavior: SCROLL });
   }
   const view = main.getBoundingClientRect();
   let top: number | null = null;
@@ -99,7 +149,7 @@ function focus(element: HTMLElement) {
   if (!pick(element, "up")) top = 0;
   else if (rect.top < view.top + 80) top = main.scrollTop + rect.top - view.top - 120;
   else if (rect.bottom > view.bottom - 40) top = main.scrollTop + rect.bottom - view.bottom + 120;
-  if (top !== null) main.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  if (top !== null) main.scrollTo({ top: Math.max(0, top), behavior: SCROLL });
 }
 
 const IN_MAIN = FOCUSABLE.split(", ")
@@ -109,11 +159,11 @@ const IN_MAIN = FOCUSABLE.split(", ")
 /** Prefers the page over the sidebar; screens without one (sign-in, profiles) use anything. */
 function first() {
   const root = scope();
-  const all = (selector: string) => [...root.querySelectorAll<HTMLElement>(selector)].filter(visible);
-  if (root !== document) return all(FOCUSABLE)[0] ?? null;
+  const firstOf = (selector: string) => [...root.querySelectorAll<HTMLElement>(selector)].find(visible) ?? null;
+  if (root !== document) return firstOf(FOCUSABLE);
   // While a page is still loading, wait for it rather than landing in the sidebar.
-  if (document.querySelector(".main")) return all(".main .btn-play:not([disabled])")[0] ?? all(IN_MAIN)[0] ?? null;
-  return all(FOCUSABLE)[0] ?? null;
+  if (document.querySelector(".main")) return firstOf(".main .btn-play:not([disabled])") ?? firstOf(IN_MAIN);
+  return firstOf(FOCUSABLE);
 }
 
 /** Remotes have no pointer, so a new screen starts with its first control focused. */
@@ -147,7 +197,7 @@ export function move(direction: Direction) {
   const next = entering ?? (inScope ? pick(current, direction) : first());
   if (next) focus(next);
   else if (inScope && direction === "up" && region(current)?.matches(".main")) {
-    document.querySelector(".main")?.scrollTo({ top: 0, behavior: "smooth" });
+    document.querySelector(".main")?.scrollTo({ top: 0, behavior: SCROLL });
   }
 }
 

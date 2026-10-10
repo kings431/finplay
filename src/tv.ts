@@ -3,17 +3,19 @@
  * usual; Back and the media keys arrive as Tizen key codes, translated here to
  * standard key names so the rest of the app only checks `event.key`.
  */
-import { focusFirst } from "./couch";
-
 export const tv = import.meta.env.MODE === "tv";
 
 /** Pages fill in after they appear, so try a few times. */
-function focusSoon() {
+function focusSoon(focusFirst: () => void) {
   for (const delay of [150, 600, 1500, 3000]) window.setTimeout(focusFirst, delay);
 }
 
 type Tizen = {
-  tvinputdevice?: { registerKey(name: string): void };
+  tvinputdevice?: {
+    registerKey(name: string): void;
+    registerKeyBatch?(names: string[], success?: () => void, error?: (error: unknown) => void): void;
+    getSupportedKeys?(): { name: string }[];
+  };
   application?: { getCurrentApplication(): { exit(): void } };
 };
 
@@ -69,23 +71,18 @@ function polyfill() {
   }
 }
 
-export function installTv() {
+/** Takes couch mode's `focusFirst` rather than importing it: couch mode reads
+ * `tv` as it loads, so the two modules can't import each other. */
+export function installTv(focusFirst: () => void) {
   if (!tv) return;
   polyfill();
   document.documentElement.toggleAttribute("data-tv", true);
-  window.addEventListener("hashchange", focusSoon);
-  focusSoon();
+  window.addEventListener("hashchange", () => focusSoon(focusFirst));
+  focusSoon(focusFirst);
   // Slow pages, controls removed while focused, and menus that just opened all
   // leave the remote with nothing to move from.
   window.setInterval(focusFirst, 700);
-  const device = tizen()?.tvinputdevice;
-  for (const name of ["MediaPlayPause", "MediaPlay", "MediaPause", "MediaStop", "MediaFastForward", "MediaRewind", "MediaTrackPrevious", "MediaTrackNext"]) {
-    try {
-      device?.registerKey(name);
-    } catch {
-      // Not every remote has every key.
-    }
-  }
+  registerMediaKeys();
   window.addEventListener(
     "keydown",
     (event) => {
@@ -93,10 +90,40 @@ export function installTv() {
       if (!key || event.key === key) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      (event.target ?? window).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      (event.target ?? window).dispatchEvent(new KeyboardEvent("keydown", { key, repeat: event.repeat, bubbles: true, cancelable: true }));
     },
     true,
   );
+}
+
+/** Tizen keeps media keys for itself unless the app claims them (which needs
+ * the tv.inputdevice privilege). A batch fails whole if one name is unknown,
+ * so only keys this TV supports are asked for. */
+function registerMediaKeys() {
+  const device = tizen()?.tvinputdevice;
+  if (!device) return;
+  let names = Object.values(KEYS).filter((name) => name.startsWith("Media"));
+  try {
+    const supported = new Set((device.getSupportedKeys?.() ?? []).map((key) => key.name));
+    if (supported.size) names = names.filter((name) => supported.has(name));
+  } catch {
+    // Older firmware: try them all.
+  }
+  const oneByOne = () => {
+    for (const name of names) {
+      try {
+        device.registerKey(name);
+      } catch {
+        // Not every remote has every key.
+      }
+    }
+  };
+  if (!device.registerKeyBatch) return oneByOne();
+  try {
+    device.registerKeyBatch(names, undefined, oneByOne);
+  } catch {
+    oneByOne();
+  }
 }
 
 /** Back on the home screen leaves the app, as TV apps do. */

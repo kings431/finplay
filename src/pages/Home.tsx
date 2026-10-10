@@ -9,6 +9,7 @@ import { useCached } from "../cache";
 import { useClient, useSession } from "../session";
 import type { Jellyfin } from "../jellyfin";
 import { loadSettings } from "../settings";
+import { tv } from "../tv";
 import type { BaseItem, HeroSource, ItemList, SeerrResult, Settings } from "../types";
 
 const BROWSE = "Movie,Series";
@@ -116,6 +117,17 @@ export function Home() {
     at: 0,
   });
   useEffect(() => () => window.clearTimeout(swipe.current.timer), []);
+  // Swapping in the next full-size backdrop stalls a TV for a moment, which is
+  // only worth it while the hero is on screen.
+  const carousel = useRef<HTMLDivElement>(null);
+  const [offscreen, setOffscreen] = useState(false);
+  useEffect(() => {
+    const element = carousel.current;
+    if (!tv || !element) return;
+    const observer = new IntersectionObserver(([entry]) => setOffscreen(!entry.isIntersecting));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   const movieLibrary = session.views.find((view) => view.CollectionType === "movies");
   const showLibrary = session.views.find((view) => view.CollectionType === "tvshows");
@@ -125,7 +137,8 @@ export function Home() {
   return (
     <div className="home">
       <div
-        className={`hero-carousel${paused ? " paused" : ""}`}
+        ref={carousel}
+        className={`hero-carousel${paused || offscreen ? " paused" : ""}`}
         onMouseEnter={() => setPaused(true)}
         onMouseLeave={() => setPaused(false)}
         onWheel={(event) => {

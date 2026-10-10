@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { tv } from "../tv";
 
 const GAP = 8;
 const MARGIN = 12;
@@ -30,17 +31,19 @@ export function Popover({
       if (!anchor || !pop) return;
       const width = pop.offsetWidth;
       const height = pop.offsetHeight;
+      // The TV's zoom leaves innerWidth in unzoomed pixels; the page's own box is in the same units as the anchor.
+      const view = tv ? document.body.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
       if (side === "right") {
-        const left = Math.min(anchor.right + GAP, window.innerWidth - width - MARGIN);
-        const top = Math.max(MARGIN, Math.min(anchor.bottom - height, window.innerHeight - height - MARGIN));
+        const left = Math.min(anchor.right + GAP, view.width - width - MARGIN);
+        const top = Math.max(MARGIN, Math.min(anchor.bottom - height, view.height - height - MARGIN));
         setStyle({ left, top });
         return;
       }
       let left = align === "end" ? anchor.right - width : anchor.left;
-      left = Math.max(MARGIN, Math.min(left, window.innerWidth - width - MARGIN));
+      left = Math.max(MARGIN, Math.min(left, view.width - width - MARGIN));
       let top = anchor.bottom + GAP;
-      if (top + height > window.innerHeight - MARGIN && anchor.top - GAP - height >= MARGIN) top = anchor.top - GAP - height;
-      top = Math.max(MARGIN, Math.min(top, window.innerHeight - height - MARGIN));
+      if (top + height > view.height - MARGIN && anchor.top - GAP - height >= MARGIN) top = anchor.top - GAP - height;
+      top = Math.max(MARGIN, Math.min(top, view.height - height - MARGIN));
       setStyle({ left, top });
     }
     place();

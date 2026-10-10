@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { IconBack } from "../icons";
 import { episodeCode, tile, primaryUrl, thumbUrl } from "../media";
@@ -82,7 +82,8 @@ export function Row({
   );
 }
 
-export function Poster({ item, subtitle }: { item: BaseItem; subtitle?: string }) {
+/** Home holds hundreds of cards; memo keeps a hero change from re-rendering them all. */
+export const Poster = memo(function Poster({ item, subtitle }: { item: BaseItem; subtitle?: string }) {
   const navigate = useNavigate();
   const session = useSession();
   const art = primaryUrl(session, item);
@@ -105,9 +106,9 @@ export function Poster({ item, subtitle }: { item: BaseItem; subtitle?: string }
       </span>
     </button>
   );
-}
+});
 
-export function RankCard({ item, rank }: { item: BaseItem; rank: number }) {
+export const RankCard = memo(function RankCard({ item, rank }: { item: BaseItem; rank: number }) {
   const navigate = useNavigate();
   const session = useSession();
   const art = primaryUrl(session, item);
@@ -119,9 +120,9 @@ export function RankCard({ item, rank }: { item: BaseItem; rank: number }) {
       </span>
     </button>
   );
-}
+});
 
-export function WideCard({ item }: { item: BaseItem }) {
+export const WideCard = memo(function WideCard({ item }: { item: BaseItem }) {
   const navigate = useNavigate();
   const session = useSession();
   const art = thumbUrl(session, item);
@@ -146,4 +147,4 @@ export function WideCard({ item }: { item: BaseItem }) {
       </span>
     </button>
   );
-}
+});

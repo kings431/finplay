@@ -45,6 +45,8 @@ pub fn run() {
                 let _ = window.set_shadow(true);
             }
             #[cfg(target_os = "macos")]
+            libmpv::remember_app_icon(app.handle());
+            #[cfg(target_os = "macos")]
             libmpv::install_key_forwarding(app.handle());
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {

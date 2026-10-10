@@ -17,6 +17,23 @@ export function trickplaySource(item: BaseItem, sourceId: string, offsetSeconds:
   return { itemId: item.Id, sourceId, info, offsetSeconds };
 }
 
+export type TrickplaySource = Source;
+
+/** Which tile sheet holds the preview for `time`, and where in it. */
+export function trickplayFrame(source: Source, time: number) {
+  const { info, offsetSeconds } = source;
+  const seconds = Math.max(0, time + offsetSeconds);
+  const thumb = Math.min(info.ThumbnailCount - 1, Math.floor((seconds * 1000) / info.Interval));
+  const perTile = info.TileWidth * info.TileHeight;
+  const offset = thumb % perTile;
+  return { tile: Math.floor(thumb / perTile), column: offset % info.TileWidth, row: Math.floor(offset / info.TileWidth) };
+}
+
+export function trickplayTileUrl(auth: Auth, source: Source, index: number) {
+  const params = new URLSearchParams({ MediaSourceId: source.sourceId, ApiKey: auth.token });
+  return `${auth.server}/Videos/${source.itemId}/Trickplay/${source.info.Width}/${index}.jpg?${params}`;
+}
+
 /**
  * Cuts preview frames out of Jellyfin's trickplay tile sheets and hands them
  * to the player overlay as raw BGRA, which is the only format mpv overlays read.
@@ -33,16 +50,13 @@ export class TrickplayRenderer {
 
   async show(time: number, width: number) {
     const ticket = ++this.latest;
-    const { info, offsetSeconds } = this.source;
-    const seconds = Math.max(0, time + offsetSeconds);
-    const thumb = Math.min(info.ThumbnailCount - 1, Math.floor((seconds * 1000) / info.Interval));
-    const perTile = info.TileWidth * info.TileHeight;
-    const bitmap = await this.tile(Math.floor(thumb / perTile));
+    const { info } = this.source;
+    const frame = trickplayFrame(this.source, time);
+    const bitmap = await this.tile(frame.tile);
     if (ticket !== this.latest) return;
 
-    const offset = thumb % perTile;
-    const sx = (offset % info.TileWidth) * info.Width;
-    const sy = Math.floor(offset / info.TileWidth) * info.Height;
+    const sx = frame.column * info.Width;
+    const sy = frame.row * info.Height;
     const w = Math.round(width);
     const h = Math.round((width * info.Height) / info.Width);
     this.canvas.width = w;
@@ -71,10 +85,7 @@ export class TrickplayRenderer {
   private tile(index: number) {
     const cached = this.tiles.get(index);
     if (cached) return cached;
-    const { auth, source } = this;
-    const params = new URLSearchParams({ MediaSourceId: source.sourceId, ApiKey: auth.token });
-    const url = `${auth.server}/Videos/${source.itemId}/Trickplay/${source.info.Width}/${index}.jpg?${params}`;
-    const loading = fetch(url)
+    const loading = fetch(trickplayTileUrl(this.auth, this.source, index))
       .then((response) => {
         if (!response.ok) throw new Error(`Trickplay tile ${index} returned ${response.status}`);
         return response.blob();

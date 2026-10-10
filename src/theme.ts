@@ -1,3 +1,4 @@
+import { tv } from "./tv";
 import type { Theme } from "./types";
 
 const query = window.matchMedia("(prefers-color-scheme: dark)");
@@ -24,7 +25,7 @@ export function applyTheme(theme: Theme) {
   paint();
 }
 
-/** Drops blur and other GPU-heavy effects (see `[data-lite]` in styles.css). */
+/** Drops blur and other GPU-heavy effects (see `[data-lite]` in styles.css). Always on for TVs. */
 export function applyLowPower(on: boolean) {
-  document.documentElement.toggleAttribute("data-lite", on);
+  document.documentElement.toggleAttribute("data-lite", on || tv);
 }
