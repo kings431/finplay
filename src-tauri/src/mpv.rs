@@ -674,6 +674,7 @@ pub fn player_mini(app: AppHandle, state: State<'_, PlayerState>, on: bool) -> b
             }
             return true;
         }
+        return false;
     }
     #[cfg(target_os = "linux")]
     {
