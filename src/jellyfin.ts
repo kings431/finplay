@@ -29,7 +29,7 @@ export class ApiError extends Error {
 }
 
 const CLIENT = "Finplay";
-export const VERSION = "0.3.27";
+export const VERSION = "0.3.28";
 let device = "Desktop";
 
 /** Names this computer in other apps' "Play on" lists. Header values must be
