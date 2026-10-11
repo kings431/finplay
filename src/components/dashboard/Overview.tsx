@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { admin, type ActivityEntry, type ItemCounts, type StorageFolder, type StorageInfo, type SystemInfo } from "../../admin";
+import { admin, type ActivityEntry, type AdminSession, type ItemCounts, type StorageFolder, type StorageInfo, type SystemInfo } from "../../admin";
 import { episodeCode } from "../../media";
 import { useClient } from "../../session";
 import { isTranscoding, playing, useSessions } from "./Sessions";
+import { sessionMethod } from "./streamDetails";
 import { TaskRow, useTasks } from "./Tasks";
 import { IconServer, ago, bytes, errorText, fullDate, usePoll, useConfirm } from "./ui";
 
@@ -172,7 +173,7 @@ export function OverviewSection({ go }: { go: (section: string) => void }) {
                         <span style={{ width: `${total ? Math.min(100, (position / total) * 100) : 0}%` }} />
                       </span>
                     </span>
-                    <span className={`method${isTranscoding(session) ? " transcode" : ""}`}>{isTranscoding(session) ? "Transcode" : session.PlayState?.PlayMethod === "DirectStream" ? "Direct stream" : "Direct play"}</span>
+                    <MethodPill session={session} />
                   </button>
                 );
               })}
@@ -282,5 +283,14 @@ export function ActivityList({ entries }: { entries: ActivityEntry[] }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function MethodPill({ session }: { session: AdminSession }) {
+  const method = sessionMethod(session);
+  return (
+    <span className={`method${method.transcode ? " transcode" : ""}`} title={method.title}>
+      {method.text}
+    </span>
   );
 }

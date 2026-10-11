@@ -116,6 +116,7 @@
 }
 .dash-chip.warn { border-color: rgba(249, 115, 22, 0.3); color: #fb923c; background: rgba(249, 115, 22, 0.08); }
 [data-theme="light"] .dash-chip.warn { color: #c2410c; }
+.dash-chip[title], .dash-streams .method[title] { cursor: help; }
 
 /* Rows */
 .dash-list { display: flex; flex-direction: column; padding: 4px 16px; }

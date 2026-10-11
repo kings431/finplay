@@ -2,12 +2,10 @@ import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } fro
 import { useNavigate } from "react-router-dom";
 import { admin, sessionCommands, type AdminSession, type SessionItem } from "../../admin";
 import { IconPause, IconPlay, IconStop } from "../../icons";
-import { episodeCode, imageUrl, prettyCodec, resolutionLabel, thumbUrl, tile, videoRangeLabel } from "../../media";
+import { episodeCode, imageUrl, thumbUrl, tile } from "../../media";
 import { useClient, useSession } from "../../session";
-import type { MediaStream } from "../../types";
-import { IconMessage, IconMute, IconNext, IconPrev, IconVolumeDown, IconVolumeUp, ago, clock, errorText, spaced, usePoll, useTicker } from "./ui";
-
-type Stream = MediaStream & { BitRate?: number; VideoRange?: string; VideoRangeType?: string; ChannelLayout?: string };
+import { sessionMethod, streamSummary, type Chip, type Stream } from "./streamDetails";
+import { IconMessage, IconMute, IconNext, IconPrev, IconVolumeDown, IconVolumeUp, ago, clock, errorText, usePoll, useTicker } from "./ui";
 
 const POLL_MS = 3000;
 
@@ -32,8 +30,7 @@ export function playing(sessions: AdminSession[] = []) {
 }
 
 export function isTranscoding(session: AdminSession) {
-  const info = session.TranscodingInfo;
-  return Boolean(info && !(info.IsVideoDirect && info.IsAudioDirect)) || session.PlayState?.PlayMethod === "Transcode";
+  return sessionMethod(session).transcode;
 }
 
 export function SessionsSection() {
@@ -298,78 +295,48 @@ function ControlButton({ label, children, onClick, disabled, big, on }: { label:
   );
 }
 
-function bitrate(bits?: number) {
-  if (!bits) return "";
-  return bits >= 1_000_000 ? `${(bits / 1_000_000).toFixed(bits >= 10_000_000 ? 0 : 1)} Mbps` : `${Math.round(bits / 1000)} kbps`;
-}
-
-function channels(count?: number) {
-  if (!count) return "";
-  if (count === 1) return "Mono";
-  if (count === 2) return "Stereo";
-  return `${count - 1}.1`;
+function ChipList({ chips }: { chips: Chip[] }) {
+  return (
+    <>
+      {chips.map((chip) => (
+        <span key={chip.text} className={`dash-chip${chip.warn ? " warn" : ""}`} title={chip.title}>
+          {chip.text}
+        </span>
+      ))}
+    </>
+  );
 }
 
 function StreamInfo({ session, streams }: { session: AdminSession; streams: Stream[] }) {
-  const info = session.TranscodingInfo;
   const state = session.PlayState ?? {};
-  const video = streams.find((stream) => stream.Type === "Video");
-  const audio = streams.find((stream) => stream.Type === "Audio" && stream.Index === state.AudioStreamIndex) ?? streams.find((stream) => stream.Type === "Audio" && stream.IsDefault) ?? streams.find((stream) => stream.Type === "Audio");
   const subtitle = streams.find((stream) => stream.Type === "Subtitle" && stream.Index === state.SubtitleStreamIndex);
-  const transcoding = isTranscoding(session);
-  const videoConverted = transcoding && info && !info.IsVideoDirect;
-  const audioConverted = transcoding && info && !info.IsAudioDirect;
-  const method = transcoding ? "Transcode" : state.PlayMethod === "DirectStream" ? "Direct stream" : "Direct play";
-  const reasons = info?.TranscodeReasons?.map((reason) => spaced(reason).replace(/ Not /g, " not ").replace(/ Is /g, " is ")) ?? [];
-
-  const videoChips = [
-    resolutionLabel(videoConverted || !video ? info : video),
-    videoConverted ? `${prettyCodec(video?.Codec)} → ${prettyCodec(info?.VideoCodec)}` : prettyCodec(video?.Codec),
-    bitrate(videoConverted ? info?.Bitrate : video?.BitRate ?? info?.Bitrate),
-    videoRangeLabel(video),
-    videoConverted && info?.HardwareAccelerationType ? `HW ${info.HardwareAccelerationType.toUpperCase()}` : "",
-  ].filter(Boolean);
-  const audioChips = [
-    audio?.Language ? audio.Language.toUpperCase() : "",
-    audioConverted ? `${prettyCodec(audio?.Codec)} → ${prettyCodec(info?.AudioCodec)}` : prettyCodec(audio?.Codec),
-    channels(audioConverted ? info?.AudioChannels : audio?.Channels),
-  ].filter(Boolean);
+  const summary = streamSummary(session, streams);
 
   return (
     <div className="dash-streams">
       <div className="dash-stream-row">
         <span className="dash-stream-label">Method</span>
         <span className="dash-chips">
-          <span className={`method${transcoding ? " transcode" : ""}`}>{method}</span>
-          {info?.Container && transcoding ? <span className="dash-chip">{info.Container.toUpperCase()}</span> : null}
-          {reasons.map((reason) => (
-            <span key={reason} className="dash-chip warn">
-              {reason}
-            </span>
-          ))}
+          <span className={`method${summary.method.transcode ? " transcode" : ""}`} title={summary.method.title}>
+            {summary.method.text}
+          </span>
+          {summary.container ? <ChipList chips={[summary.container]} /> : null}
+          <ChipList chips={summary.reasons} />
         </span>
       </div>
-      {videoChips.length ? (
+      {summary.video.length ? (
         <div className="dash-stream-row">
           <span className="dash-stream-label">Video</span>
           <span className="dash-chips">
-            {videoChips.map((chip) => (
-              <span key={chip} className="dash-chip">
-                {chip}
-              </span>
-            ))}
+            <ChipList chips={summary.video} />
           </span>
         </div>
       ) : null}
-      {audioChips.length ? (
+      {summary.audio.length ? (
         <div className="dash-stream-row">
           <span className="dash-stream-label">Audio</span>
           <span className="dash-chips">
-            {audioChips.map((chip) => (
-              <span key={chip} className="dash-chip">
-                {chip}
-              </span>
-            ))}
+            <ChipList chips={summary.audio} />
           </span>
         </div>
       ) : null}
