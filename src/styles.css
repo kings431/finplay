@@ -1408,6 +1408,98 @@ button.nav-btn { border: 0; background: none; }
 .download-actions { display: flex; gap: 8px; }
 .download-actions .btn-ghost { height: 34px; font-size: 13px; }
 .downloads-folder { padding: 18px 56px 0; word-break: break-all; }
+.downloads-page .page-head .chips { align-self: flex-end; }
+.dl-section { margin-top: 18px; }
+.dl-section-title { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 0 56px; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.dl-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: 0; text-transform: none; background: var(--accent-soft); color: var(--accent-text); }
+.dl-badge.bad { background: var(--danger-bg); color: var(--danger-fg); }
+.download-row.failed { background: rgb(var(--fg-rgb) / 0.03); }
+.download-list.compact .download-row { grid-template-columns: 128px 1fr auto; padding: 6px 8px; }
+.dl-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.dl-series-list { display: flex; flex-direction: column; gap: 10px; padding: 0 48px; }
+.dl-series { border-radius: 16px; border: 1px solid var(--line); background: rgb(var(--fg-rgb) / 0.025); overflow: hidden; }
+.dl-series.open { background: rgb(var(--fg-rgb) / 0.04); }
+.dl-series-head { display: flex; align-items: center; gap: 16px; padding: 10px 16px 10px 10px; }
+.dl-series-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  border-radius: 12px;
+}
+.dl-poster {
+  position: relative;
+  flex: 0 0 auto;
+  width: 76px;
+  aspect-ratio: 2 / 3;
+  border-radius: 9px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  font-size: 28px;
+  font-weight: 700;
+  color: rgb(var(--fg-rgb) / 0.5);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.dl-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.dl-series-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.dl-series-copy strong { font-size: 19px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-series-copy > small { color: var(--muted); font-size: 13px; }
+.dl-series-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 2px; }
+.dl-series-status small { color: var(--faint); font-size: 12.5px; }
+.dl-watch-meter { width: 90px; height: 4px; border-radius: 99px; background: rgb(var(--fg-rgb) / 0.12); overflow: hidden; }
+.dl-watch-meter span { display: block; height: 100%; background: var(--accent); }
+.dl-chevron { margin-left: auto; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 999px; display: grid; place-items: center; color: var(--muted); transition: transform 0.2s; }
+.dl-series-toggle:hover .dl-chevron { background: rgb(var(--fg-rgb) / 0.08); color: var(--fg); }
+.dl-series.open .dl-chevron { transform: rotate(180deg); }
+.dl-series-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.dl-series-actions .btn-play, .dl-series-actions .btn-ghost { height: 36px; font-size: 13px; padding: 0 14px; }
+.dl-series-actions .btn-play { gap: 6px; }
+.dl-series-body { border-top: 1px solid var(--line); padding: 6px 8px 10px; }
+.dl-season + .dl-season { margin-top: 4px; }
+.dl-season-head { display: flex; align-items: center; gap: 12px; padding: 12px 8px 6px; }
+.dl-season-head h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.dl-season-head span { color: var(--faint); font-size: 13px; }
+.dl-season-head .btn-ghost { margin-left: auto; height: 30px; font-size: 12.5px; padding: 0 12px; background: transparent; }
+.dl-season-head .btn-ghost:hover { background: var(--danger-bg); }
+.dl-episodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dl-episode { display: grid; grid-template-columns: 152px 1fr auto; gap: 16px; align-items: center; padding: 6px 8px; border-radius: 12px; }
+.dl-episode:hover { background: rgb(var(--fg-rgb) / 0.04); }
+.dl-episode .download-art { border-radius: 8px; }
+.dl-episode .download-copy strong { font-size: 15px; font-weight: 600; }
+.dl-episode.watched .download-copy strong { color: var(--muted); }
+.dl-number { color: var(--faint); font-variant-numeric: tabular-nums; margin-right: 10px; font-weight: 500; }
+.dl-watched-label { color: var(--accent-text); }
+.dl-episode .download-actions .btn-ghost { height: 30px; font-size: 12.5px; padding: 0 12px; background: transparent; color: var(--muted); }
+.dl-episode .download-actions .btn-ghost:hover { background: var(--danger-bg); color: var(--danger-fg); }
+.dl-confirm h2 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+.dl-confirm .hero-actions { justify-content: flex-end; margin-top: 18px; }
+.btn-primary.dl-danger { background: #dc2626; color: #fff; }
+[data-couch] .dl-series-toggle:focus { outline-offset: 4px; }
+[data-couch] .dl-episode .download-actions .btn-ghost:focus { color: var(--fg); }
+@media (max-width: 900px) {
+  .dl-series-head { flex-wrap: wrap; }
+  .dl-series-actions { width: 100%; justify-content: flex-end; }
+  .dl-episode { grid-template-columns: 120px 1fr auto; }
+}
 
 .stats-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .stats-head-actions .btn-ghost { display: inline-flex; align-items: center; gap: 8px; height: 34px; font-size: 13px; }
