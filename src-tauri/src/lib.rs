@@ -14,6 +14,8 @@ mod trailer;
 use device::device_name;
 use downloads::{download_delete, download_dir, download_list, download_progress, download_start};
 use mpv::{player_focus, player_mini, player_play, player_request, player_stop, player_thumb, PlayerState};
+#[cfg(target_os = "linux")]
+use mpv::maybe_test_play;
 use stats::open_stats;
 use trailer::{play_trailer, trailer_stream};
 use tauri::Manager;
@@ -30,10 +32,12 @@ pub fn run() {
             std::thread::spawn(desktop_entry::install);
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
+                // Wheel scrolling with WebKitGTK's smooth-scroll interpolates every
+                // step across a heavy home page; dragging the scrollbar stays fine.
                 let _ = window.with_webview(|webview| {
                     use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
                     if let Some(settings) = WebViewExt::settings(&webview.inner()) {
-                        settings.set_enable_smooth_scrolling(true);
+                        settings.set_enable_smooth_scrolling(false);
                         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
                     }
                 });
@@ -43,6 +47,10 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
                 let _ = window.set_shadow(true);
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
             }
             #[cfg(target_os = "macos")]
             libmpv::remember_app_icon(app.handle());
@@ -62,6 +70,8 @@ pub fn run() {
             let handle = app.handle().clone();
             app.manage(mpris::Mpris::start(move |control| mpv::control(&handle, control)));
             app.manage(downloads::Downloads::new(app.handle()));
+            #[cfg(target_os = "linux")]
+            maybe_test_play(app.handle());
             Ok(())
         })
         .manage(PlayerState::new())

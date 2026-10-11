@@ -106,6 +106,13 @@ export function Shell() {
     return () => window.clearTimeout(timer);
   }, [retrying, status]);
 
+  // Hide the custom title bar while the native player owns the window.
+  useEffect(() => {
+    const playing = Boolean(active) && !mini && !active?.streams && location.pathname.startsWith("/playing/");
+    document.documentElement.toggleAttribute("data-native-playing", playing);
+    return () => document.documentElement.removeAttribute("data-native-playing");
+  }, [active, mini, location.pathname]);
+
   if (offline && !OFFLINE_PATHS.some((path) => location.pathname.startsWith(path))) {
     return <Navigate to="/downloads" replace />;
   }

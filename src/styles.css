@@ -264,11 +264,14 @@ button.nav-btn { border: 0; background: none; }
    place so the window still drags, and Windows gets its caption buttons back. */
 :root { --titlebar: 0px; }
 .platform-mac { --titlebar: 28px; }
-.platform-windows { --titlebar: 32px; }
+.platform-windows, .platform-linux { --titlebar: 32px; }
 .app-shell .sidebar { padding-top: calc(16px + var(--titlebar)); }
 .main { padding-top: var(--titlebar); }
 .splash, .login { padding-top: var(--titlebar); box-sizing: border-box; }
 .titlebar { position: fixed; z-index: 200; top: 0; left: 0; right: 0; height: var(--titlebar); display: flex; justify-content: flex-end; }
+/* Native mpv covers the window; hide the caption strip so it does not peek through. */
+[data-native-playing] { --titlebar: 0px; }
+[data-native-playing] .titlebar { display: none; }
 .titlebar-controls { display: flex; height: 100%; }
 .titlebar-controls button {
   width: 46px;
@@ -403,7 +406,7 @@ button.nav-btn { border: 0; background: none; }
 .hero-carousel:focus-within .hero-nav { opacity: 1; }
 /* Windows has no trackpad swipe, so the highlight arrows stay visible.
    Mac keeps the horizontal gesture and does not show these buttons. */
-.platform-windows .hero-nav { opacity: 1; }
+.platform-windows .hero-nav, .platform-linux .hero-nav { opacity: 1; }
 .platform-mac .hero-nav { display: none; }
 .hero-nav:hover { background: rgba(0, 0, 0, 0.65); }
 .hero-prev { left: 16px; }
@@ -474,7 +477,7 @@ button.nav-btn { border: 0; background: none; }
 .row-scroller:hover .row-nav { opacity: 1; }
 /* Same as the highlight arrows: a mouse cannot side-scroll these rows.
    Mac scrolls them with the trackpad and does not show the buttons. */
-.platform-windows .row-nav { opacity: 1; }
+.platform-windows .row-nav, .platform-linux .row-nav { opacity: 1; }
 .platform-mac .row-nav { display: none; }
 .row-nav.hidden { opacity: 0 !important; pointer-events: none; }
 .row-nav.left { left: 6px; }

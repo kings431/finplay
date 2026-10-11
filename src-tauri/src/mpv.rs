@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,6 +48,26 @@ pub struct PlayerState {
     inner: Arc<Mutex<Option<Session>>>,
 }
 
+/// Linux picture-in-picture: a small always-on-top mpv window (no AppKit mini).
+/// Cleared when playback stops or when returning to the in-app embed.
+#[cfg(target_os = "linux")]
+static LINUX_MINI: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+fn linux_mini() -> bool {
+    LINUX_MINI.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_mini(on: bool) {
+    LINUX_MINI.store(on, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "linux")]
+fn take_linux_mini() -> bool {
+    LINUX_MINI.swap(false, Ordering::SeqCst)
+}
+
 /// The running player: an mpv process, or on macOS libmpv inside Finplay.
 enum Engine {
     Process(Child),
@@ -76,6 +96,14 @@ impl Engine {
             }
             #[cfg(target_os = "macos")]
             Engine::Library(player) => player.terminate(),
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        match self {
+            Engine::Process(child) => child.id(),
+            #[cfg(target_os = "macos")]
+            Engine::Library(_) => 0,
         }
     }
 }
@@ -111,6 +139,9 @@ struct Shared {
     /// Started by `switch_mode` to move playback in or out of fullscreen.
     restart: bool,
     engine: &'static str,
+    /// OS pid of the mpv process (0 for in-process libmpv). Used on Linux to
+    /// find the PiP X11 window without blocking the IPC reader on `send_command`.
+    mpv_pid: AtomicU32,
 }
 
 #[derive(Clone, Serialize)]
@@ -237,6 +268,49 @@ impl PlayerState {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Linux CI/manual hook: `FINPLAY_TEST_PLAY=/path/to.mp4` starts embedded playback
+/// a moment after launch so drag/PiP can be exercised without Jellyfin.
+#[cfg(target_os = "linux")]
+pub fn maybe_test_play(app: &AppHandle) {
+    let Ok(path) = std::env::var("FINPLAY_TEST_PLAY") else { return };
+    if path.is_empty() || !std::path::Path::new(&path).is_file() {
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(2));
+        let Some(window) = main_window(&app) else { return };
+        let state = app.state::<PlayerState>();
+        let inner = Arc::clone(&state.inner);
+        let wid = embed_target(&window);
+        let request = PlayRequest {
+            url: path,
+            title: "Finplay Test".into(),
+            start_seconds: 0.0,
+            fullscreen: false,
+            audio_lang: String::new(),
+            subtitle_lang: String::new(),
+            subtitles_enabled: false,
+            subtitle_scale: 1.0,
+            subtitle_color: String::new(),
+            subtitle_font: String::new(),
+            playback_speed: 1.0,
+            mpv_path: "mpv".into(),
+            badge: "Test".into(),
+            trickplay: false,
+            segments: String::new(),
+            next_title: String::new(),
+            auto_skip: false,
+            low_power: false,
+            artist: String::new(),
+            art_url: String::new(),
+            download_id: String::new(),
+            trailer: false,
+        };
+        let _ = start_player(app, inner, request, wid, false, Vec::new(), false);
+    });
 }
 
 #[tauri::command]
@@ -380,6 +454,13 @@ fn flip_fullscreen(shared: &Arc<Shared>) {
     if crate::libmpv::take_mini() {
         let _ = shared.app.emit("player-mini", false);
     }
+    // Leave Linux PiP before fullscreen so we don't grow the corner window.
+    #[cfg(target_os = "linux")]
+    if take_linux_mini() {
+        let _ = shared.app.emit("player-mini", false);
+        switch_linux_mode(shared, LinuxMode::Fullscreen);
+        return;
+    }
     // Embedded borderless child windows cannot take Spaces fullscreen on macOS
     // (AppKit throws NSGenericException). Restart in a normal mpv window with
     // --fs, then hand back when leaving fullscreen — same as Wayland.
@@ -472,6 +553,12 @@ fn switch_mode(shared: &Arc<Shared>) {
 }
 
 fn escape(shared: &Arc<Shared>) {
+    #[cfg(target_os = "linux")]
+    if linux_mini() {
+        let _ = shared.app.emit("player-mini", false);
+        switch_linux_mode(shared, LinuxMode::Embed);
+        return;
+    }
     // Handed-off playback runs in a separate mpv window; ESC returns to the
     // in-app embed instead of quitting.
     if shared.handoff {
@@ -588,14 +675,124 @@ pub fn player_mini(app: AppHandle, state: State<'_, PlayerState>, on: bool) -> b
             return true;
         }
     }
-    false
+    #[cfg(target_os = "linux")]
+    {
+        let shared = lock(&state.inner).as_ref().map(|session| Arc::clone(&session.shared));
+        let Some(shared) = shared else {
+            if !on {
+                set_linux_mini(false);
+                return true;
+            }
+            return false;
+        };
+        if on {
+            if !shared.embedded || shared.handoff || linux_mini() {
+                return linux_mini();
+            }
+            switch_linux_mode(&shared, LinuxMode::Mini);
+            return true;
+        }
+        if !linux_mini() {
+            return true;
+        }
+        switch_linux_mode(&shared, LinuxMode::Embed);
+        return true;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (app, state, on);
+        false
+    }
 }
 
 fn mini_now() -> bool {
     #[cfg(target_os = "macos")]
     return crate::libmpv::is_mini();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return linux_mini();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     false
+}
+
+/// Linux-only restarts between the in-app embed, picture-in-picture, and FS.
+#[cfg(target_os = "linux")]
+enum LinuxMode {
+    Embed,
+    Mini,
+    Fullscreen,
+}
+
+/// Restarts playback for Linux picture-in-picture or leaving it.
+#[cfg(target_os = "linux")]
+fn switch_linux_mode(shared: &Arc<Shared>, mode: LinuxMode) {
+    if shared.switching.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        let get = |name: &str| send_command(&shared, vec![json!("get_property"), json!(name)]).ok();
+        let mut request = shared.request.clone();
+        if let Some(time) = get("time-pos").and_then(|value| value.as_f64()) {
+            request.start_seconds = time;
+        }
+        let mut carry = Vec::new();
+        for name in ["aid", "sid", "volume", "mute", "speed", "pause"] {
+            let text = match get(name) {
+                Some(Value::Bool(on)) => if on { "yes" } else { "no" }.to_string(),
+                Some(Value::Number(number)) => number.to_string(),
+                Some(Value::String(text)) if !text.chars().any(|ch| ch.is_control()) => text,
+                _ => continue,
+            };
+            carry.push(format!("--{name}={text}"));
+        }
+        let (wid, handoff) = match mode {
+            LinuxMode::Embed => {
+                set_linux_mini(false);
+                request.fullscreen = false;
+                (main_window(&shared.app).and_then(|window| embed_target(&window)), false)
+            }
+            LinuxMode::Mini => {
+                set_linux_mini(true);
+                request.fullscreen = false;
+                (None, false)
+            }
+            LinuxMode::Fullscreen => {
+                set_linux_mini(false);
+                request.fullscreen = true;
+                // Same rule as start: Wayland hands off; X11 can fullscreen Finplay.
+                let embed = main_window(&shared.app).and_then(|window| embed_target(&window));
+                let handoff = embed.is_some() && wayland_session();
+                if handoff {
+                    (None, true)
+                } else {
+                    (embed, false)
+                }
+            }
+        };
+        let resume_at = request.start_seconds;
+        let inner = Arc::clone(&shared.app.state::<PlayerState>().inner);
+        if let Err(err) = start_player(shared.app.clone(), inner, request, wid, handoff, carry, true) {
+            set_linux_mini(false);
+            let _ = shared.app.emit(
+                "player",
+                PlayerEvent {
+                    kind: "status".into(),
+                    time: resume_at,
+                    duration: 0.0,
+                    paused: true,
+                    ended: true,
+                    reason: "error".into(),
+                    detail: err,
+                    embedded: false,
+                    volume: 100.0,
+                    muted: false,
+                    rate: 1.0,
+                    diagnostics: None,
+                },
+            );
+        }
+        shared.switching.store(false, Ordering::SeqCst);
+    });
 }
 
 #[tauri::command]
@@ -612,6 +809,8 @@ pub async fn player_stop(state: State<'_, PlayerState>) -> Result<(), String> {
 
 fn stop_player(inner: &Arc<Mutex<Option<Session>>>) {
     stop_session(inner, false);
+    #[cfg(target_os = "linux")]
+    set_linux_mini(false);
 }
 
 /// Stops the current player. With `keep_fullscreen` a window it made
@@ -687,13 +886,20 @@ fn start_player(
     restart: bool,
 ) -> Result<(), String> {
     let media = if request.download_id.is_empty() {
-        if !(request.url.starts_with("https://") || request.url.starts_with("http://")) {
+        let url = request.url.as_str();
+        let local = url.starts_with("file://")
+            || (url.starts_with('/') && std::path::Path::new(url).is_file());
+        if !(url.starts_with("https://") || url.starts_with("http://") || local) {
             return Err("Refusing to open a stream that is not http or https.".into());
         }
         if request.url.chars().any(|ch| ch.is_control()) {
             return Err("The stream address from Jellyfin was not usable.".into());
         }
-        request.url.clone()
+        if let Some(path) = url.strip_prefix("file://") {
+            path.to_string()
+        } else {
+            request.url.clone()
+        }
     } else {
         app.state::<Downloads>()
             .media_path(&request.download_id)
@@ -750,7 +956,19 @@ fn start_player(
         let _ = std::fs::remove_file(&sock);
     }
 
-    let can_mini = cfg!(target_os = "macos") && wid.is_some();
+    // macOS floats the embedded Metal view; Linux opens a small on-top window.
+    let can_mini = (cfg!(target_os = "macos") && wid.is_some())
+        || (cfg!(target_os = "linux") && (wid.is_some() || mini_now()));
+    // Top player chrome (back/title row) drags the Finplay window on Linux.
+    let drag_top = if cfg!(target_os = "linux") && wid.is_some() && !handoff {
+        main_window(&app)
+            .and_then(|window| window.scale_factor().ok())
+            .map(|scale| (88.0 * scale).round() as i64)
+            .unwrap_or(88)
+            .clamp(56, 160)
+    } else {
+        0
+    };
     let mut args: Vec<String> = vec![
         "--no-config".into(),
         "--input-terminal=no".into(),
@@ -773,13 +991,15 @@ fn start_player(
         format!("--input-ipc-server={sock}"),
         format!("--script={}", script_path.display()),
         format!(
-            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={},finplay-pip={},finplay-mini={}{}",
+            // mpv 0.41+ keeps underscores in script-opt keys (finplay-drag_top, not drag-top).
+            "--script-opts=finplay-badge={badge},finplay-embedded={},finplay-handoff={},finplay-trickplay={},finplay-segments={segments},finplay-next={next_title},finplay-autoskip={},finplay-pip={},finplay-mini={},finplay-drag_top={}{}",
             if wid.is_some() { "yes" } else { "no" },
             if handoff { "yes" } else { "no" },
             if request.trickplay { "yes" } else { "no" },
             if request.auto_skip { "yes" } else { "no" },
             if can_mini { "yes" } else { "no" },
             if can_mini && mini_now() { "yes" } else { "no" },
+            drag_top,
             if ytdl.is_empty() { String::new() } else { format!(",ytdl_hook-ytdl_path={ytdl}") }
         ),
         format!("--title=Finplay — {title}"),
@@ -841,12 +1061,27 @@ fn start_player(
         args.push("--hwdec=auto-safe".into());
     }
     if wid.is_none() {
-        // Standalone window (Wayland/macOS fullscreen handoff, or no embed).
+        // Standalone window (Wayland/macOS fullscreen handoff, Linux PiP, or no embed).
         // Keep a normal chrome so macOS can run a real Spaces transition.
-        let placement = if request.fullscreen { "--fs" } else { "--geometry=80%x80%" };
-        args.push(placement.into());
         if request.fullscreen {
+            args.push("--fs".into());
             args.push("--native-fs=yes".into());
+        } else if mini_now() {
+            // Borderless corner window that stays above other apps while browsing.
+            args.push("--geometry=480x270-24-24".into());
+            args.push("--border=no".into());
+            args.push("--ontop=yes".into());
+            args.push("--ontop-level=system".into());
+            // Our lua/X11 path owns move+resize. mpv's begin-vo-dragging aborts it.
+            args.push("--window-dragging=no".into());
+            // Aspect is enforced in win_drag apply_delta; mpv's keepaspect fights configure.
+            args.push("--keepaspect-window=no".into());
+            args.push("--keepaspect=yes".into());
+            args.push("--on-all-workspaces=yes".into());
+            // Lets KWin (and our keep-above helper) recognize the PiP window.
+            args.push("--wayland-app-id=finplay-pip".into());
+        } else {
+            args.push("--geometry=80%x80%".into());
         }
     }
     if !request.audio_lang.trim().is_empty() {
@@ -948,8 +1183,10 @@ fn start_player(
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
             crate::host_env::use_host_environment(&mut command);
-            if wid.is_some() {
-                // mpv prefers Wayland when it can reach it, and Wayland ignores --wid.
+            // Wayland cannot host --wid, and cannot place/drag a PiP window. Use
+            // X11 for both; KWin keepAbove (see keep_above) stacks the XWayland
+            // PiP over native Wayland apps — the EWMH ABOVE atom alone cannot.
+            if wid.is_some() || mini_now() {
                 command.env_remove("WAYLAND_DISPLAY");
             }
             let mut process = command.spawn().map_err(|err| {
@@ -1004,6 +1241,7 @@ fn start_player(
         started: Instant::now(),
         restart,
         engine,
+        mpv_pid: AtomicU32::new(child.pid()),
     });
     shared.awake.set(true);
 
@@ -1066,12 +1304,20 @@ fn start_player(
             diagnostics: None,
         },
     );
-    // Windows only. macOS draws through libmpv above the page, and on Linux the
-    // X11 window is already stacked above WebKit. Here mpv's child is created
-    // behind WebView2, so the picture never appears until it is raised.
+    // Windows: raise mpv above WebView2. Linux embed fills the window; drag and
+    // resize use EWMH from the player script so the title bar can stay hidden.
     #[cfg(windows)]
     if let Some(host) = wid {
         embed::keep_visible(host, Arc::clone(&shared));
+    }
+    // Picture-in-picture: pin above other windows. mpv --ontop is ignored on
+    // Wayland; under KWin we load a short script, and on X11 we set ABOVE.
+    if mini_now() {
+        let _ = send_command(&shared, vec![json!("set_property"), json!("border"), json!(false)]);
+        let _ = send_command(&shared, vec![json!("set_property"), json!("ontop"), json!(true)]);
+        let _ = send_command(&shared, vec![json!("set_property"), json!("ontop-level"), json!("system")]);
+        #[cfg(target_os = "linux")]
+        linux_embed::keep_above(Arc::clone(&shared));
     }
     Ok(())
 }
@@ -1183,7 +1429,50 @@ fn read_loop(app: AppHandle, shared: Arc<Shared>, mut reader: BufReader<Box<dyn 
                         match value.pointer("/args/0").and_then(Value::as_str) {
                             Some("finplay-fullscreen") => toggle_fullscreen(&shared),
                             Some("finplay-escape") => escape(&shared),
+                            Some("finplay-win") => {
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let phase = value.pointer("/args/1").and_then(Value::as_str).unwrap_or("");
+                                    let dir = value
+                                        .pointer("/args/2")
+                                        .and_then(Value::as_str)
+                                        .and_then(|text| text.parse::<u32>().ok())
+                                        .unwrap_or(linux_embed::MOVE);
+                                    let dx = value
+                                        .pointer("/args/3")
+                                        .and_then(Value::as_str)
+                                        .and_then(|text| text.parse::<i32>().ok())
+                                        .unwrap_or(0);
+                                    let dy = value
+                                        .pointer("/args/4")
+                                        .and_then(Value::as_str)
+                                        .and_then(|text| text.parse::<i32>().ok())
+                                        .unwrap_or(0);
+                                    match phase {
+                                        "start" => {
+                                            if linux_mini() {
+                                                linux_embed::win_drag_start_mpv(&shared, dir);
+                                            } else if let Some(window) = main_window(&app) {
+                                                linux_embed::win_drag_start_finplay(window, dir);
+                                            }
+                                        }
+                                        "move" => linux_embed::win_drag_move(dir, dx, dy),
+                                        "end" => linux_embed::win_drag_end(),
+                                        _ => {}
+                                    }
+                                }
+                            }
                             Some("finplay-mini") => {
+                                #[cfg(target_os = "linux")]
+                                {
+                                    // Don't wait on the web UI — toggle PiP here so the
+                                    // player chrome works even before React catches up.
+                                    if linux_mini() {
+                                        switch_linux_mode(&shared, LinuxMode::Embed);
+                                    } else if shared.embedded && !shared.handoff {
+                                        switch_linux_mode(&shared, LinuxMode::Mini);
+                                    }
+                                }
                                 let _ = app.emit("player-mini-toggle", ());
                             }
                             Some("finplay-back") => quit(&shared),
@@ -1347,6 +1636,8 @@ fn emit_closed(app: &AppHandle, shared: &Arc<Shared>, probe: &PlaybackProbe, rea
     if shared.closed_sent.swap(true, Ordering::SeqCst) {
         return;
     }
+    #[cfg(target_os = "linux")]
+    set_linux_mini(false);
     let _ = app.emit(
         "player",
         PlayerEvent {
@@ -1523,6 +1814,387 @@ fn split_stream(stream: IpcStream) -> Result<(Box<dyn Write + Send>, BufReader<B
         .try_clone()
         .map_err(|err| format!("Could not connect to mpv: {err}"))?;
     Ok((Box::new(stream.0), BufReader::new(Box::new(reader))))
+}
+
+/// Linux helpers: move/resize Finplay (or PiP) by tracking the pointer while
+/// button 1 is held (EWMH `_NET_WM_MOVERESIZE` is unreliable under KWin/XWayland
+/// when the press landed in mpv), and keep PiP above other windows.
+#[cfg(target_os = "linux")]
+mod linux_embed {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use tauri::WebviewWindow;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, Window,
+    };
+
+    use super::Shared;
+
+    const NET_WM_STATE_ADD: u32 = 1;
+    /// EWMH `_NET_WM_MOVERESIZE` direction: move the window.
+    pub const MOVE: u32 = 8;
+    const KWIN_SCRIPT_NAME: &str = "finplay-pip-above";
+
+    fn connect() -> Option<(x11rb::rust_connection::RustConnection, usize)> {
+        x11rb::connect(None).ok()
+    }
+
+    fn atom(conn: &impl Connection, name: &str) -> Option<u32> {
+        conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom)
+    }
+
+    /// Top-level X11 window for the mpv process. Looks up `_NET_WM_PID` so this
+    /// is safe to call from the IPC read loop (unlike `get_property window-id`,
+    /// which deadlocks waiting for a reply the reader itself would deliver).
+    pub fn mpv_window_id(shared: &Shared) -> Option<Window> {
+        let pid = shared.mpv_pid.load(Ordering::Relaxed);
+        if pid == 0 {
+            return None;
+        }
+        let (conn, screen) = connect()?;
+        let root = root_of(&conn, screen)?;
+        window_for_pid(&conn, root, pid)
+    }
+
+    fn window_for_pid(conn: &impl Connection, root: Window, pid: u32) -> Option<Window> {
+        let pid_atom = atom(conn, "_NET_WM_PID")?;
+        let list_atom = atom(conn, "_NET_CLIENT_LIST")?;
+        let prop = conn
+            .get_property(false, root, list_atom, AtomEnum::WINDOW, 0, 4096)
+            .ok()?
+            .reply()
+            .ok()?;
+        for window in prop.value32()? {
+            let Ok(cookie) = conn.get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1) else {
+                continue;
+            };
+            let Ok(reply) = cookie.reply() else { continue };
+            if reply.value32().and_then(|mut values| values.next()) == Some(pid) {
+                return Some(window);
+            }
+        }
+        None
+    }
+
+    fn root_of(conn: &impl Connection, screen: usize) -> Option<Window> {
+        conn.setup().roots.get(screen).map(|s| s.root)
+    }
+
+    /// Absolute position and size. Avoid `translate_coordinates` — on XWayland it
+    /// often returns negated coordinates for override-less toplevels.
+    fn window_frame(conn: &impl Connection, window: Window, root: Window) -> Option<(i32, i32, i32, i32, Window)> {
+        let geom = conn.get_geometry(window).ok()?.reply().ok()?;
+        let (width, height) = (i32::from(geom.width), i32::from(geom.height));
+        let mut x = i32::from(geom.x);
+        let mut y = i32::from(geom.y);
+        let mut current = window;
+        for _ in 0..16 {
+            let tree = conn.query_tree(current).ok()?.reply().ok()?;
+            if tree.parent == root || tree.parent == 0 {
+                return Some((x, y, width, height, current));
+            }
+            let parent_geom = conn.get_geometry(tree.parent).ok()?.reply().ok()?;
+            x += i32::from(parent_geom.x);
+            y += i32::from(parent_geom.y);
+            current = tree.parent;
+        }
+        Some((x, y, width, height, window))
+    }
+
+    fn apply_delta(dir: u32, x0: i32, y0: i32, w0: i32, h0: i32, dx: i32, dy: i32, aspect: bool) -> (i32, i32, i32, i32) {
+        let min_w = 320;
+        let min_h = 180;
+        let (mut x, mut y, mut w, mut h) = (x0, y0, w0, h0);
+        match dir {
+            0 => {
+                // top-left
+                x = x0 + dx;
+                y = y0 + dy;
+                w = (w0 - dx).max(min_w);
+                h = (h0 - dy).max(min_h);
+            }
+            1 => {
+                // top
+                y = y0 + dy;
+                h = (h0 - dy).max(min_h);
+            }
+            2 => {
+                // top-right
+                y = y0 + dy;
+                w = (w0 + dx).max(min_w);
+                h = (h0 - dy).max(min_h);
+            }
+            3 => {
+                // right
+                w = (w0 + dx).max(min_w);
+            }
+            4 => {
+                // bottom-right
+                w = (w0 + dx).max(min_w);
+                h = (h0 + dy).max(min_h);
+            }
+            5 => {
+                // bottom
+                h = (h0 + dy).max(min_h);
+            }
+            6 => {
+                // bottom-left
+                x = x0 + dx;
+                w = (w0 - dx).max(min_w);
+                h = (h0 + dy).max(min_h);
+            }
+            7 => {
+                // left
+                x = x0 + dx;
+                w = (w0 - dx).max(min_w);
+            }
+            _ => {
+                // move
+                x = x0 + dx;
+                y = y0 + dy;
+            }
+        }
+        if aspect && dir != MOVE {
+            // Keep 16:9 for picture-in-picture.
+            let by_w = ((w as f64) * 9.0 / 16.0).round() as i32;
+            let by_h = ((h as f64) * 16.0 / 9.0).round() as i32;
+            if matches!(dir, 3 | 7) {
+                h = by_w.max(min_h);
+            } else if matches!(dir, 1 | 5) {
+                w = by_h.max(min_w);
+            } else if (w0 - w).abs() >= (h0 - h).abs() {
+                h = by_w.max(min_h);
+            } else {
+                w = by_h.max(min_w);
+            }
+            if matches!(dir, 0 | 6 | 7) {
+                x = x0 + w0 - w;
+            }
+            if matches!(dir, 0 | 1 | 2) {
+                y = y0 + h0 - h;
+            }
+        }
+        (x, y, w, h)
+    }
+
+    struct WinDrag {
+        /// Top-level / frame window to move.
+        frame: Window,
+        /// Content window to resize (same as frame for Finplay; mpv's client for PiP).
+        window: Window,
+        dir: u32,
+        x0: i32,
+        y0: i32,
+        w0: i32,
+        h0: i32,
+        /// Root-window pointer at grab start. Move/resize uses screen deltas from
+        /// this — mpv's window-relative mouse-pos jumps whenever the window moves.
+        ptr_x0: i32,
+        ptr_y0: i32,
+        /// Keep 16:9 while resizing picture-in-picture.
+        aspect: bool,
+        last_x: i32,
+        last_y: i32,
+        last_w: i32,
+        last_h: i32,
+    }
+
+    static WIN_DRAG: Mutex<Option<WinDrag>> = Mutex::new(None);
+
+    fn pointer_root(conn: &impl Connection, root: Window) -> Option<(i32, i32)> {
+        let reply = conn.query_pointer(root).ok()?.reply().ok()?;
+        Some((i32::from(reply.root_x), i32::from(reply.root_y)))
+    }
+
+    fn arm_drag(conn: &impl Connection, root: Window, window: Window, dir: u32, aspect: bool) -> Option<()> {
+        let (x0, y0, w0, h0, frame) = window_frame(conn, window, root)?;
+        let (ptr_x0, ptr_y0) = pointer_root(conn, root)?;
+        *WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()) = Some(WinDrag {
+            frame,
+            window,
+            dir,
+            x0,
+            y0,
+            w0,
+            h0,
+            ptr_x0,
+            ptr_y0,
+            aspect,
+            last_x: x0,
+            last_y: y0,
+            last_w: w0,
+            last_h: h0,
+        });
+        // Poll the root pointer while held. mpv mouse-pos is window-relative, so once
+        // the window tracks the cursor the relative delta goes to ~0 and move events stop.
+        thread::spawn(|| {
+            while WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                win_drag_tick();
+                thread::sleep(Duration::from_millis(8));
+            }
+        });
+        Some(())
+    }
+
+    pub fn win_drag_start_finplay(_window: WebviewWindow, dir: u32) {
+        let Some((conn, screen)) = connect() else { return };
+        let Some(root) = root_of(&conn, screen) else { return };
+        // Same X11 coordinate space as QueryPointer — Tauri set_position fights it on XWayland.
+        let Some(window) = window_for_pid(&conn, root, std::process::id()) else { return };
+        let _ = arm_drag(&conn, root, window, dir, false);
+    }
+
+    pub fn win_drag_start_mpv(shared: &Arc<Shared>, dir: u32) {
+        let Some((conn, screen)) = connect() else { return };
+        let Some(root) = root_of(&conn, screen) else { return };
+        let Some(window) = mpv_window_id(shared) else { return };
+        let _ = arm_drag(&conn, root, window, dir, true);
+    }
+
+    pub fn win_drag_move(dir: u32, _dx: i32, _dy: i32) {
+        if let Some(drag) = WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            drag.dir = dir;
+        }
+        win_drag_tick();
+    }
+
+    fn win_drag_tick() {
+        let Some((conn, screen)) = connect() else { return };
+        let Some(root) = root_of(&conn, screen) else { return };
+        let Some((ptr_x, ptr_y)) = pointer_root(&conn, root) else { return };
+        let mut guard = WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(drag) = guard.as_mut() else { return };
+        let dx = ptr_x - drag.ptr_x0;
+        let dy = ptr_y - drag.ptr_y0;
+        let (x, y, w, h) = apply_delta(drag.dir, drag.x0, drag.y0, drag.w0, drag.h0, dx, dy, drag.aspect);
+        if x == drag.last_x && y == drag.last_y && w == drag.last_w && h == drag.last_h {
+            return;
+        }
+        drag.last_x = x;
+        drag.last_y = y;
+        drag.last_w = w;
+        drag.last_h = h;
+        let dir = drag.dir;
+        let frame = drag.frame;
+        let window = drag.window;
+        // Drop the lock before X11 IO so the end/start path never waits on a round-trip.
+        drop(guard);
+        if dir == MOVE {
+            let _ = conn.configure_window(frame, &ConfigureWindowAux::new().x(x).y(y));
+        } else if frame == window {
+            let mut aux = ConfigureWindowAux::new().width(w as u32).height(h as u32);
+            if matches!(dir, 0 | 1 | 2 | 6 | 7) {
+                aux = aux.x(x).y(y);
+            }
+            let _ = conn.configure_window(window, &aux);
+        } else {
+            let _ = conn.configure_window(window, &ConfigureWindowAux::new().width(w as u32).height(h as u32));
+            if matches!(dir, 0 | 1 | 2 | 6 | 7) {
+                let _ = conn.configure_window(frame, &ConfigureWindowAux::new().x(x).y(y));
+            }
+        }
+        let _ = conn.flush();
+    }
+
+    pub fn win_drag_end() {
+        *WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn set_above(conn: &impl Connection, window: Window) -> Result<(), Box<dyn std::error::Error>> {
+        let root = conn.setup().roots[0].root;
+        let state = atom(conn, "_NET_WM_STATE").ok_or("atom")?;
+        let above = atom(conn, "_NET_WM_STATE_ABOVE").ok_or("atom")?;
+        // EWMH: always-on-top must be requested via a client message to the root.
+        let event = ClientMessageEvent::new(32, window, state, [NET_WM_STATE_ADD, above, 0, 0, 0]);
+        conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event)?;
+        // Raise within the X11 stack too (helps when ABOVE is flaky on XWayland).
+        let _ = conn.configure_window(window, &ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE));
+        conn.flush()?;
+        Ok(())
+    }
+
+    /// KWin on Wayland ignores client ontop hints; a tiny script can set keepAbove.
+    fn kwin_pip_script(enable: bool) {
+        let Ok(conn) = dbus::blocking::Connection::new_session() else { return };
+        let proxy = conn.with_proxy("org.kde.KWin", "/Scripting", Duration::from_millis(800));
+        if !enable {
+            let _: Result<(bool,), _> =
+                proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (KWIN_SCRIPT_NAME.to_string(),));
+            return;
+        }
+        let path = std::env::temp_dir().join("finplay-kwin-pip.js");
+        let script = r#"
+function isPip(w) {
+    try {
+        var cls = (w.resourceClass || "").toString().toLowerCase();
+        var name = (w.resourceName || "").toString().toLowerCase();
+        if (cls.indexOf("finplay-pip") !== -1 || name.indexOf("finplay-pip") !== -1) return true;
+        var cap = (w.caption || "").toString();
+        var small = (w.width || 0) <= 720 && (w.height || 0) <= 480;
+        if (small && (cls === "mpv" || name === "mpv")) return true;
+        if (small && cap.indexOf("Finplay") === 0) return true;
+    } catch (e) {}
+    return false;
+}
+function apply(w) {
+    if (!isPip(w)) return;
+    try {
+        w.keepAbove = true;
+        w.onAllDesktops = true;
+    } catch (e) {}
+}
+function refresh() {
+    try {
+        var list = workspace.windowList ? workspace.windowList()
+            : (workspace.clientList ? workspace.clientList() : []);
+        for (var i = 0; i < list.length; ++i) apply(list[i]);
+    } catch (e) {}
+}
+refresh();
+try {
+    if (workspace.windowAdded) workspace.windowAdded.connect(apply);
+    else if (workspace.clientAdded) workspace.clientAdded.connect(apply);
+} catch (e) {}
+try {
+    if (workspace.windowActivated) workspace.windowActivated.connect(refresh);
+    else if (workspace.clientActivated) workspace.clientActivated.connect(refresh);
+} catch (e) {}
+"#;
+        let _ = std::fs::write(&path, script);
+        let _: Result<(bool,), _> =
+            proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (KWIN_SCRIPT_NAME.to_string(),));
+        let path_str = path.to_string_lossy().into_owned();
+        let _: Result<(i32,), _> = proxy.method_call(
+            "org.kde.kwin.Scripting",
+            "loadScript",
+            (path_str, KWIN_SCRIPT_NAME.to_string()),
+        );
+        let _: Result<(), _> = proxy.method_call("org.kde.kwin.Scripting", "start", ());
+    }
+
+    /// Re-applies always-on-top for the standalone PiP window.
+    pub fn keep_above(shared: Arc<Shared>) {
+        thread::spawn(move || {
+            kwin_pip_script(true);
+            let conn = connect();
+            let mut last = 0u32;
+            while !shared.stop.load(Ordering::Relaxed) {
+                let id = mpv_window_id(&shared);
+                if let (Some((ref conn, _)), Some(window)) = (conn.as_ref(), id) {
+                    last = window;
+                    let _ = set_above(conn, window);
+                } else if let (Some((ref conn, _)), true) = (conn.as_ref(), last != 0) {
+                    let _ = set_above(conn, last);
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            kwin_pip_script(false);
+        });
+    }
 }
 
 /// Keeps mpv's embedded child visible on Windows.

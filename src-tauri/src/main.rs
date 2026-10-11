@@ -17,7 +17,10 @@ fn main() {
             if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
                 command.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
             }
-            if std::env::var_os("GDK_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
+            // Prefer X11 whenever a DISPLAY exists so mpv can --wid embed and our
+            // frameless window works. Pure Wayland cannot host another client's
+            // surface. Opt out with FINPLAY_WAYLAND=1 for testing.
+            if std::env::var_os("DISPLAY").is_some() && std::env::var_os("FINPLAY_WAYLAND").is_none() {
                 command.env("GDK_BACKEND", "x11");
             }
             let err = command.exec();

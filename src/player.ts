@@ -82,7 +82,7 @@ export async function playerFocus() {
   await invoke("player_focus");
 }
 
-/** False when there is no embedded player to shrink (only macOS has one). */
+/** False when there is no player to put in picture-in-picture (macOS embed / Linux). */
 export async function playerMini(on: boolean) {
   if (!inTauri()) return false;
   const { invoke } = await import("@tauri-apps/api/core");

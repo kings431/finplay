@@ -23,6 +23,7 @@ ureq = "2"
 dbus = "0.9"
 dbus-crossroads = "0.5"
 webkit2gtk = { version = "2", features = ["v2_40"] }
+x11rb = "0.13"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-process = "2"

@@ -25,8 +25,18 @@ export function useSessions(ms = POLL_MS) {
   return { ...poll, seenAt: seenAt.current };
 }
 
+/** Stable order so a poll can't reshuffle cards when LastActivityDate races. */
+function compareSessions(a: AdminSession, b: AdminSession) {
+  return (
+    (a.UserName ?? "").localeCompare(b.UserName ?? "", undefined, { sensitivity: "base" }) ||
+    (a.DeviceName ?? "").localeCompare(b.DeviceName ?? "", undefined, { sensitivity: "base" }) ||
+    (a.DeviceId ?? "").localeCompare(b.DeviceId ?? "") ||
+    a.Id.localeCompare(b.Id)
+  );
+}
+
 export function playing(sessions: AdminSession[] = []) {
-  return sessions.filter((session) => session.NowPlayingItem);
+  return sessions.filter((session) => session.NowPlayingItem).sort(compareSessions);
 }
 
 export function isTranscoding(session: AdminSession) {
@@ -37,7 +47,7 @@ export function SessionsSection() {
   const { data, error, loading, reload, seenAt } = useSessions();
   const [showIdle, setShowIdle] = useState(false);
   const active = playing(data);
-  const idle = (data ?? []).filter((session) => !session.NowPlayingItem);
+  const idle = (data ?? []).filter((session) => !session.NowPlayingItem).sort(compareSessions);
   useTicker(active.some((session) => !session.PlayState?.IsPaused));
 
   return (

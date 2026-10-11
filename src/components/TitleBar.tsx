@@ -1,12 +1,13 @@
 import { inTauri } from "../player";
 
-export type Platform = "mac" | "windows" | "other";
+export type Platform = "mac" | "windows" | "linux" | "other";
 
 export function detectPlatform(): Platform {
   if (!inTauri()) return "other";
   const agent = navigator.userAgent;
   if (agent.includes("Mac")) return "mac";
   if (agent.includes("Windows")) return "windows";
+  if (agent.includes("Linux")) return "linux";
   return "other";
 }
 
@@ -24,9 +25,10 @@ async function currentWindow() {
 export function TitleBar() {
   const platform = detectPlatform();
   if (platform === "other") return null;
+  const captions = platform === "windows" || platform === "linux";
   return (
     <div className="titlebar" data-tauri-drag-region>
-      {platform === "windows" ? (
+      {captions ? (
         <div className="titlebar-controls">
           <button aria-label="Minimize" onClick={() => void currentWindow().then((window) => window.minimize())}>
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">

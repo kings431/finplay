@@ -7,8 +7,12 @@ local assdraw = require("mp.assdraw")
 local opts = {
     badge = "", embedded = false, handoff = false, trickplay = false,
     segments = "", next = "", autoskip = false, pip = false, mini = false,
+    -- Pixels at the top of the window that drag Finplay instead of pausing (Linux).
+    drag_top = 0,
 }
 options.read_options(opts, "finplay")
+-- Coerce: script-opts always arrive as strings on some builds.
+opts.drag_top = tonumber(opts.drag_top) or 0
 
 local ACCENT = "EA3393"
 local HIDE_AFTER = 2.6
@@ -39,6 +43,10 @@ local state = {
     last_tick = nil,
     -- Shrunk into a corner of Finplay while the library is browsed.
     mini = opts.mini,
+    -- Prevents down+press from starting two move/resize grabs.
+    drag_sent = nil,
+    -- Window move/resize driven by mouse deltas (X11 button state is unreliable).
+    win_drag = nil,
 }
 
 local THUMB_OVERLAY = 7
@@ -255,12 +263,37 @@ local SPEEDS = { 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 }
 
 -- Actions.
 
-local function app_message(name)
-    mp.commandv("script-message", name)
+local function app_message(name, ...)
+    local args = { name, ... }
+    for i = 1, #args do args[i] = tostring(args[i]) end
+    -- mpv uses Lua 5.1 / LuaJIT: unpack is global; table.unpack is nil.
+    mp.commandv("script-message", unpack(args))
+end
+
+-- EWMH _NET_WM_MOVERESIZE directions (edges of the embedded / PiP window).
+-- Top edge alone is reserved for dragging the window, not vertical resize.
+local function edge_resize_dir(x, y)
+    local ww = mp.get_property_number("osd-width") or 0
+    local wh = mp.get_property_number("osd-height") or 0
+    if ww < 32 or wh < 32 then return nil end
+    -- PiP is small; use a thicker hit zone so edges are easy to grab.
+    local e = state.mini and math.max(16, math.floor(math.min(ww, wh) * 0.06))
+        or math.max(10, math.floor(math.min(ww, wh) * 0.02))
+    local left, right = x <= e, x >= ww - e
+    local top, bottom = y <= e, y >= wh - e
+    if top and left then return 0 end
+    if top and right then return 2 end
+    if bottom and right then return 4 end
+    if bottom and left then return 6 end
+    if right then return 3 end
+    if bottom then return 5 end
+    if left then return 7 end
+    return nil
 end
 
 local function go_back()
-    if opts.embedded or opts.handoff then
+    -- Linux picture-in-picture runs as a small standalone window with opts.mini.
+    if opts.embedded or opts.handoff or opts.mini then
         app_message("finplay-back")
     else
         mp.command("quit")
@@ -268,7 +301,7 @@ local function go_back()
 end
 
 local function toggle_fullscreen()
-    if opts.embedded or opts.handoff then
+    if opts.embedded or opts.handoff or opts.mini then
         app_message("finplay-fullscreen")
     else
         mp.command("cycle fullscreen")
@@ -961,24 +994,46 @@ local function on_left(event)
     local x, y = mouse_x, mouse_y
     local position = mp.get_property_native("mouse-pos")
     if position then x, y = position.x, position.y end
+    -- Some mpv builds emit "press" instead of "down" for the first edge.
     if event.event == "down" or event.event == "press" then
+        if state.drag_sent then
+            return
+        end
         local was_hidden = state.blank
         active()
         render()
-        if was_hidden then
+        local button = hit(x, y)
+        -- Controls always win over window move/resize.
+        if button then
+            pcall(button.action)
+            render()
             return
         end
-        if event.event == "down" and not state.menu and inside(state.seekbar, x, y) then
+        if not was_hidden and not state.menu and inside(state.seekbar, x, y) then
             state.dragging = true
             state.last_drag_seek = now()
             seek_to(seek_ratio(x), false)
             render()
             return
         end
-        local button = hit(x, y)
-        if button then
-            pcall(button.action)
-        elseif state.menu then
+        local resize = edge_resize_dir(x, y)
+        if resize then
+            state.drag_sent = true
+            state.win_drag = { x = x, y = y, kind = "resize", dir = resize }
+            app_message("finplay-win", "start", resize)
+            return
+        end
+        -- Top chrome (embed) or empty PiP area moves the window.
+        if (opts.drag_top > 0 and y < opts.drag_top) or state.mini then
+            state.drag_sent = true
+            state.win_drag = { x = x, y = y, kind = "move", dir = 8 }
+            app_message("finplay-win", "start", 8)
+            return
+        end
+        if was_hidden then
+            return
+        end
+        if state.menu then
             state.menu = nil
         else
             -- Remember the state before a click run so a double-click can restore it.
@@ -989,10 +1044,17 @@ local function on_left(event)
             toggle_pause()
         end
         render()
-    elseif event.event == "up" and state.dragging then
-        state.dragging = false
-        seek_to(seek_ratio(x), true)
-        render()
+    elseif event.event == "up" then
+        if state.win_drag then
+            app_message("finplay-win", "end", state.win_drag.dir or 8)
+            state.win_drag = nil
+        end
+        state.drag_sent = nil
+        if state.dragging then
+            state.dragging = false
+            seek_to(seek_ratio(x), true)
+            render()
+        end
     end
 end
 
@@ -1013,9 +1075,18 @@ end
 
 local function on_move()
     active()
+    local position = mp.get_property_native("mouse-pos") or {}
+    local x, y = position.x or 0, position.y or 0
+    if state.win_drag then
+        local dx, dy = x - state.win_drag.x, y - state.win_drag.y
+        if math.abs(dx) >= 1 or math.abs(dy) >= 1 then
+            app_message("finplay-win", "move", state.win_drag.dir or 8, math.floor(dx), math.floor(dy))
+            state.win_drag.x, state.win_drag.y = x, y
+        end
+        return
+    end
     if state.dragging then
-        local position = mp.get_property_native("mouse-pos") or {}
-        state.drag_ratio = seek_ratio(position.x or 0)
+        state.drag_ratio = seek_ratio(x)
         if now() - state.last_drag_seek > 0.15 then
             state.last_drag_seek = now()
             seek_to(state.drag_ratio, false)
@@ -1047,7 +1118,7 @@ local function on_escape()
     if state.menu then
         state.menu = nil
         render()
-    elseif opts.embedded or opts.handoff then
+    elseif opts.embedded or opts.handoff or opts.mini then
         app_message("finplay-escape")
     elseif mp.get_property_bool("fullscreen") then
         mp.set_property_bool("fullscreen", false)
@@ -1061,6 +1132,11 @@ local function key(fn)
         pcall(fn)
         pcall(render)
     end
+end
+
+-- Don't let mpv's built-in window drag steal the button after we start a resize/move.
+if opts.mini or opts.drag_top > 0 then
+    mp.set_property_bool("window-dragging", false)
 end
 
 mp.add_forced_key_binding("MBTN_LEFT", "finplay-click", safe(on_left), { complex = true })
