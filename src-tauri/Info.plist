@@ -4,5 +4,13 @@
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Finplay connects to your Jellyfin server directly on your home network for faster streaming.</string>
+	<!-- Jellyfin servers are often plain http on LAN or Tailscale (100.x) addresses, which
+	     App Transport Security blocks in the webview. Adding any other ATS key here makes
+	     macOS ignore NSAllowsArbitraryLoads. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
