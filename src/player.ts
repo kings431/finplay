@@ -30,7 +30,8 @@ export type PlayRequest = {
   artUrl: string;
   /** A remote trailer streamed through yt-dlp. */
   trailer?: boolean;
-  /** Subtitle files for the browser player; mpv reads the ones inside the stream. */
+  /** Subtitle files: the chosen one for the browser player, and for mpv the
+   * external files the stream lacks (it reads the ones inside the stream itself). */
   subtitles?: { url: string; label: string; lang?: string; selected: boolean }[];
 };
 

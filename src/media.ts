@@ -313,14 +313,25 @@ export function withStreams(url: string, choice: StreamChoice, burn: boolean) {
 }
 
 /** A text subtitle as WebVTT. This server refuses `api_key`, so the token goes in `ApiKey`. */
-export function subtitleFile(auth: Auth, itemId: string, mediaSourceId: string, stream: MediaStream) {
+export function subtitleFile(auth: Auth, itemId: string, mediaSourceId: string, stream: MediaStream, format = "vtt", selected = true) {
   const params = new URLSearchParams({ ApiKey: auth.token });
   return {
-    url: `${auth.server}/Videos/${itemId}/${mediaSourceId}/Subtitles/${stream.Index}/0/Stream.vtt?${params}`,
+    url: `${auth.server}/Videos/${itemId}/${mediaSourceId}/Subtitles/${stream.Index}/0/Stream.${format}?${params}`,
     label: streamLabel(stream),
     lang: stream.Language,
-    selected: true,
+    selected,
   };
+}
+
+/** Subtitle files kept beside the video, which a direct-played stream does not
+ * carry, for mpv to add. ASS keeps its styling; other text formats go as SRT. */
+export function externalSubtitles(auth: Auth, itemId: string, source: MediaSource, chosen: number) {
+  return subtitleStreams(source.MediaStreams)
+    .filter((stream) => stream.IsExternal && isTextSubtitle(stream))
+    .map((stream) => {
+      const format = /^(ass|ssa)$/i.test(stream.Codec ?? "") ? "ass" : "srt";
+      return subtitleFile(auth, itemId, source.Id, stream, format, stream.Index === chosen);
+    });
 }
 
 export function mediaUrl(auth: Auth, itemId: string, source: MediaSource, playSessionId: string, mediaType?: string) {

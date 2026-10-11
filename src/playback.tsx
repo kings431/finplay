@@ -21,6 +21,7 @@ import {
   playbackTitle,
   secondsToTicks,
   streamBadge,
+  externalSubtitles,
   subtitleFile,
   ticksToSeconds,
   withStreams,
@@ -700,6 +701,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         const video = source.MediaStreams?.find((stream) => stream.Type === "Video");
         const audio = source.MediaStreams?.find((stream) => stream.Type === "Audio");
         const subtitle = choice ? textSubtitle(client, target.item.Id, source, choice.subtitle, burn) : undefined;
+        // mpv picks tracks inside the file from the language settings; an external
+        // file is only selected when it is the subtitle Finplay would choose.
+        const mpvSubtitle = settings.subtitlesEnabled || options?.subtitleIndex !== undefined ? withAsked(initialStreams(source, settings), source, options).subtitle : -1;
+        const subtitles = choice ? (subtitle ? [subtitle] : undefined) : externalSubtitles(client.auth, target.item.Id, source, mpvSubtitle);
         const playback: ActivePlayback = {
           item: target.item,
           playSessionId: info.PlaySessionId,
@@ -725,7 +730,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           segments: segmentsFor(segments, ticksToSeconds(playback.baseTicks)),
           next,
           artUrl: `${client.auth.server}/Items/${target.item.SeriesId ?? target.item.Id}/Images/Primary?maxHeight=400`,
-          subtitles: subtitle ? [subtitle] : undefined,
+          subtitles,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : typeof err === "string" && err ? err : "Playback failed.");

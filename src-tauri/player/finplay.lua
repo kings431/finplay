@@ -149,6 +149,21 @@ local function text(x, y, align, size, value, color, tags)
         align, n(x), n(y), n(size * 1.4), color or "FFFFFF", tags or "", escape(value)))
 end
 
+-- ASS can't measure text, so this estimates from an average glyph width and
+-- callers also clip at the edge in case a string runs wider than average.
+local function fit(value, size, max_w)
+    local per_char = size * 1.4 * 0.42
+    local limit = math.floor(max_w / per_char)
+    local chars = {}
+    for char in value:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        chars[#chars + 1] = char
+    end
+    if #chars <= limit then return value end
+    local cut = table.concat(chars, "", 1, math.max(1, limit - 1))
+    cut = cut:gsub("[%s%-]+$", ""):gsub("%s*·$", "")
+    return cut .. "…"
+end
+
 local function inside(area, x, y)
     return area and x >= area.x and x <= area.x + area.w and y >= area.y and y <= area.y + area.h
 end
@@ -562,12 +577,15 @@ local function draw_menu(pad)
             shape(circle(x + 24 * scale, ry + row_h / 2, 5 * scale), ACCENT)
         end
         local label_x = x + 42 * scale
-        local tags = row.selected and "\\b1" or ""
+        local label_w = x + panel_w - 16 * scale - label_x
+        local clip = string.format("\\q2\\clip(%s,%s,%s,%s)", n(label_x), n(ry), n(label_x + label_w), n(ry + row_h))
+        local tags = (row.selected and "\\b1" or "") .. clip
+        local label = fit(row.label, 15 * scale, label_w)
         if row.detail ~= "" then
-            text(label_x, ry + row_h / 2 - 1 * scale, 1, 15 * scale, row.label, "FFFFFF", tags .. "\\q2")
-            text(label_x, ry + row_h / 2 + 2 * scale, 7, 12 * scale, row.detail, "A0A0A8", "\\q2")
+            text(label_x, ry + row_h / 2 - 1 * scale, 1, 15 * scale, label, "FFFFFF", tags)
+            text(label_x, ry + row_h / 2 + 2 * scale, 7, 12 * scale, fit(row.detail, 12 * scale, label_w), "A0A0A8", clip)
         else
-            text(label_x, ry + row_h / 2, 4, 15 * scale, row.label, "FFFFFF", tags .. "\\q2")
+            text(label_x, ry + row_h / 2, 4, 15 * scale, label, "FFFFFF", tags)
         end
     end
 end
