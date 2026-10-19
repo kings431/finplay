@@ -1420,12 +1420,25 @@ fn send_command(shared: &Shared, command: Vec<Value>) -> Result<Value, String> {
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     lock(&shared.pending).insert(id, tx);
     let line = json!({ "command": command, "request_id": id }).to_string();
+    // A request mpv never answers would otherwise stay in `pending` for the
+    // rest of the session.
+    let forget = || {
+        lock(&shared.pending).remove(&id);
+    };
     {
         let mut writer = lock(&shared.writer);
-        writeln!(writer, "{line}").map_err(|err| format!("Could not talk to mpv: {err}"))?;
-        writer.flush().map_err(|err| format!("Could not talk to mpv: {err}"))?;
+        let sent = writeln!(writer, "{line}").and_then(|_| writer.flush());
+        if let Err(err) = sent {
+            drop(writer);
+            forget();
+            return Err(format!("Could not talk to mpv: {err}"));
+        }
     }
-    match rx.recv_timeout(Duration::from_secs(4)) {
+    let answer = rx.recv_timeout(Duration::from_secs(4));
+    if answer.is_err() {
+        forget();
+    }
+    match answer {
         Ok(value) => {
             if value.get("error").and_then(Value::as_str) == Some("success") {
                 Ok(value.get("data").cloned().unwrap_or(Value::Null))

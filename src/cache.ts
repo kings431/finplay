@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 
 const store = new Map<string, { value: unknown; at: number }>();
 const listeners = new Map<string, Set<() => void>>();
+/** Loads still running, so a page remounted mid-load (Home → title → back)
+ * joins them instead of sending every request again. */
+const inflight = new Map<string, Promise<unknown>>();
 /** Every library filter and detail page adds an entry; keep the most recent. */
 const MAX_ENTRIES = 150;
 /** Entries kept across launches so the first screen draws before the server answers. */
@@ -44,6 +47,33 @@ function remember(key: string, value: unknown) {
   }
 }
 
+/** One load per key at a time. Only the newest load for a key is remembered:
+ * after `invalidate` drops it, a slower older answer can't overwrite a fresh one. */
+function loadOnce<T>(key: string, load: () => Promise<T>, persist: boolean): Promise<T> {
+  const running = inflight.get(key);
+  if (running) return running as Promise<T>;
+  const promise: Promise<T> = load().then(
+    (value) => {
+      if (inflight.get(key) === promise) {
+        inflight.delete(key);
+        remember(key, value);
+        if (persist) toDisk(key);
+      }
+      return value;
+    },
+    (err: unknown) => {
+      if (inflight.get(key) === promise) inflight.delete(key);
+      throw err;
+    },
+  );
+  inflight.set(key, promise);
+  return promise;
+}
+
+function forget(prefix: string) {
+  for (const key of inflight.keys()) if (key.startsWith(prefix)) inflight.delete(key);
+}
+
 function notify(prefix: string) {
   for (const [key, set] of listeners) {
     if (key.startsWith(prefix)) {
@@ -54,18 +84,21 @@ function notify(prefix: string) {
 
 export function clearCache() {
   store.clear();
+  inflight.clear();
   for (const key of Object.keys(localStorage)) if (key.startsWith(DISK_PREFIX)) localStorage.removeItem(key);
   notify("");
 }
 
 export function invalidate(prefix: string) {
   for (const key of store.keys()) if (key.startsWith(prefix)) store.delete(key);
+  forget(prefix);
   notify(prefix);
 }
 
 /** Like `invalidate`, but keeps showing the old value while the refetch runs. */
 export function markStale(prefix: string) {
   for (const [key, entry] of store) if (key.startsWith(prefix)) entry.at = 0;
+  forget(prefix);
   notify(prefix);
 }
 
@@ -113,11 +146,8 @@ export function useCached<T>(key: string | null, load: () => Promise<T>, options
       return;
     }
     setLoading(cached === undefined);
-    loadRef
-      .current()
+    loadOnce(key, () => loadRef.current(), persist)
       .then((value) => {
-        remember(key, value);
-        if (persist) toDisk(key);
         if (!cancel) setData(value);
       })
       .catch((err: unknown) => {

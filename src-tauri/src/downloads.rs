@@ -400,6 +400,8 @@ impl Downloads {
             .unwrap_or_else(|_| std::env::temp_dir().join("finplay"))
             .join("downloads");
         let _ = fs::create_dir_all(&dir);
+        let sweep = dir.clone();
+        thread::spawn(move || empty_trash(&sweep));
         let mut entries: Vec<Entry> = fs::read(dir.join("downloads.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -440,7 +442,33 @@ impl Downloads {
         store.entries.retain(|entry| entry.id != id);
         self.inner.save(&store);
         drop(store);
-        let _ = fs::remove_dir_all(self.inner.dir.join(id));
+        let folder = self.inner.dir.join(id);
+        // This runs on the window's thread, and deleting a multi-gigabyte file
+        // can take seconds on a slow or network disk. Moving the folder aside
+        // is instant on the same volume; the delete then finishes in the
+        // background, and a new download of this title starts from a clean
+        // folder. If the move fails, delete in place as before.
+        let trash = self.inner.dir.join(format!("{TRASH_PREFIX}{id}-{}", unix_now()));
+        if fs::rename(&folder, &trash).is_ok() {
+            thread::spawn(move || {
+                let _ = fs::remove_dir_all(trash);
+            });
+        } else {
+            let _ = fs::remove_dir_all(folder);
+        }
+    }
+}
+
+/// Folders of deleted downloads still being removed in the background.
+const TRASH_PREFIX: &str = ".trash-";
+
+/// Finishes deletes a previous run was closed in the middle of.
+fn empty_trash(dir: &Path) {
+    let Ok(list) = fs::read_dir(dir) else { return };
+    for entry in list.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(TRASH_PREFIX) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 

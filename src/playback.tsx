@@ -886,11 +886,6 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   // through IPC for the whole session so Space/arrows work in and out of fullscreen.
   useEffect(() => {
     if (!active || !inTauri()) return;
-    async function nudgeVolume(delta: number) {
-      const current = await playerRequest(["get_property", "volume"]);
-      const volume = typeof current === "number" ? current : 100;
-      await playerRequest(["set_property", "volume", Math.min(130, Math.max(0, volume + delta))]);
-    }
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       if (resumeAsk || miniRef.current) return;
@@ -912,12 +907,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       } else if (event.key === "ArrowRight") {
         handled = true;
         void playerRequest(["seek", 10, "relative", "exact"]);
-      } else if (event.key === "ArrowUp") {
+      } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         handled = true;
-        void nudgeVolume(5);
-      } else if (event.key === "ArrowDown") {
-        handled = true;
-        void nudgeVolume(-5);
+        // Through the overlay's own binding: one step at a time inside mpv (a
+        // held key no longer races a read against a write) and the same
+        // volume toast as when mpv has focus.
+        void playerRequest(["keypress", event.key === "ArrowUp" ? "UP" : "DOWN"]);
       } else if (event.key === "Escape") {
         handled = true;
         // Through the overlay, which closes an open menu before leaving fullscreen.

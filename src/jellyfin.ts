@@ -60,7 +60,15 @@ function authHeader(deviceId: string, token?: string) {
   return `MediaBrowser Client="${CLIENT}", Device="${device}", DeviceId="${deviceId}", Version="${VERSION}"${tokenPart}`;
 }
 
-const LIST_FIELDS = "Overview,Genres,CommunityRating,OfficialRating,RunTimeTicks,ChildCount,PrimaryImageAspectRatio";
+/** How long to wait for a server's answer to start before giving up. Without
+ * this a server that accepts the connection but never replies leaves pages
+ * loading forever (WebView2 waits minutes). Only the wait for the response
+ * headers is timed, so a large body on a slow link still finishes. */
+const REQUEST_TIMEOUT = 30_000;
+/** Opening a live TV tuner or querying a big playback history can take a while. */
+const SLOW_REQUEST_TIMEOUT = 120_000;
+
+const LIST_FIELDS ="Overview,Genres,CommunityRating,OfficialRating,RunTimeTicks,ChildCount,PrimaryImageAspectRatio";
 /** Enough for poster and wide cards; overviews and genres are only shown in heroes and details. */
 const CARD_FIELDS = "ChildCount,PrimaryImageAspectRatio,Genres";
 
@@ -314,10 +322,14 @@ export class Jellyfin {
    * PlaybackActivity table. User ids come back as user names.
    */
   async playbackQuery(sql: string) {
-    const body = await this.json<{ colums?: string[]; results?: string[][]; message?: string }>("/user_usage_stats/submit_custom_query", {
-      CustomQueryString: sql,
-      ReplaceUserId: true,
-    });
+    const body = await this.json<{ colums?: string[]; results?: string[][]; message?: string }>(
+      "/user_usage_stats/submit_custom_query",
+      {
+        CustomQueryString: sql,
+        ReplaceUserId: true,
+      },
+      SLOW_REQUEST_TIMEOUT,
+    );
     if (body.message) throw new Error(body.message);
     return body.results ?? [];
   }
@@ -479,8 +491,9 @@ export class Jellyfin {
     return this.send(played ? "POST" : "DELETE", `/UserPlayedItems/${itemId}?userId=${this.auth.userId}`);
   }
 
+  /** Results are drawn as cards and never paged, so skip overviews and the match count. */
   search(term: string, includeItemTypes: string, limit = 24) {
-    return this.items({ searchTerm: term, includeItemTypes, limit });
+    return this.items({ searchTerm: term, includeItemTypes, limit, slim: true, extra: { EnableTotalRecordCount: "false" } });
   }
 
   /** `direct: false` asks for a server stream, which can switch audio or burn in subtitles. */
@@ -493,19 +506,23 @@ export class Jellyfin {
     if (options.audioIndex !== undefined && options.audioIndex >= 0) query.set("AudioStreamIndex", String(options.audioIndex));
     if (options.subtitleIndex !== undefined) query.set("SubtitleStreamIndex", String(options.subtitleIndex));
     const search = query.toString();
-    return this.json<PlaybackInfo>(`/Items/${itemId}/PlaybackInfo${search ? `?${search}` : ""}`, {
-      UserId: this.auth.userId,
-      MaxStreamingBitrate: options.maxBitrate,
-      StartTimeTicks: options.startTicks,
-      AutoOpenLiveStream: true,
-      EnableDirectPlay: options.direct ?? true,
-      EnableDirectStream: options.direct ?? true,
-      EnableTranscoding: true,
-      MediaSourceId: options.mediaSourceId,
-      AudioStreamIndex: options.audioIndex !== undefined && options.audioIndex >= 0 ? options.audioIndex : undefined,
-      SubtitleStreamIndex: options.subtitleIndex,
-      DeviceProfile: deviceProfile(options.maxBitrate),
-    });
+    return this.json<PlaybackInfo>(
+      `/Items/${itemId}/PlaybackInfo${search ? `?${search}` : ""}`,
+      {
+        UserId: this.auth.userId,
+        MaxStreamingBitrate: options.maxBitrate,
+        StartTimeTicks: options.startTicks,
+        AutoOpenLiveStream: true,
+        EnableDirectPlay: options.direct ?? true,
+        EnableDirectStream: options.direct ?? true,
+        EnableTranscoding: true,
+        MediaSourceId: options.mediaSourceId,
+        AudioStreamIndex: options.audioIndex !== undefined && options.audioIndex >= 0 ? options.audioIndex : undefined,
+        SubtitleStreamIndex: options.subtitleIndex,
+        DeviceProfile: deviceProfile(options.maxBitrate),
+      },
+      SLOW_REQUEST_TIMEOUT,
+    );
   }
 
   /** Ends the server's transcode for a stream this device has moved off. */
@@ -545,18 +562,22 @@ export class Jellyfin {
   }
 
   livePrograms(channelIds: string[], start: Date, end: Date) {
-    return this.json<ItemList>("/LiveTv/Programs", {
-      UserId: this.auth.userId,
-      ChannelIds: channelIds,
-      MinEndDate: start.toISOString(),
-      MaxStartDate: end.toISOString(),
-      SortBy: ["StartDate"],
-      EnableImages: true,
-      EnableImageTypes: ["Primary", "Thumb"],
-      Fields: ["Overview"],
-      EnableTotalRecordCount: false,
-      Limit: 5000,
-    });
+    return this.json<ItemList>(
+      "/LiveTv/Programs",
+      {
+        UserId: this.auth.userId,
+        ChannelIds: channelIds,
+        MinEndDate: start.toISOString(),
+        MaxStartDate: end.toISOString(),
+        SortBy: ["StartDate"],
+        EnableImages: true,
+        EnableImageTypes: ["Primary", "Thumb"],
+        Fields: ["Overview"],
+        EnableTotalRecordCount: false,
+        Limit: 5000,
+      },
+      SLOW_REQUEST_TIMEOUT,
+    );
   }
 
   report(event: "start" | "progress" | "stop", body: Record<string, unknown>) {
@@ -638,13 +659,19 @@ export class Jellyfin {
     return (await response.json()) as T;
   }
 
-  private async json<T>(path: string, body?: unknown): Promise<T> {
-    const response = await this.send(body ? "POST" : "GET", path, body);
+  private async json<T>(path: string, body?: unknown, timeoutMs = REQUEST_TIMEOUT): Promise<T> {
+    const response = await this.send(body ? "POST" : "GET", path, body, undefined, true, timeoutMs);
     return (await response.json()) as T;
   }
 
-  private async send(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>, signOutOn401 = true) {
+  private async send(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>, signOutOn401 = true, timeoutMs = REQUEST_TIMEOUT) {
     let response: Response;
+    const abort = new AbortController();
+    let timedOut = false;
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, timeoutMs);
     try {
       response = await fetch(`${this.auth.server}${path}`, {
         method,
@@ -655,9 +682,12 @@ export class Jellyfin {
           ...extraHeaders,
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal: abort.signal,
       });
     } catch {
-      throw new Error("Could not reach the Jellyfin server.");
+      throw new Error(timedOut ? "The Jellyfin server took too long to answer." : "Could not reach the Jellyfin server.");
+    } finally {
+      window.clearTimeout(timer);
     }
     if (response.status === 401) {
       if (!signOutOn401) throw new ApiError(401, "The server didn't allow that.");
