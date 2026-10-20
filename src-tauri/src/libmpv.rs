@@ -386,10 +386,13 @@ unsafe fn place(embed: Embed) {
     }
     MINI_PLACED.store(false, Ordering::SeqCst);
     let content: *mut AnyObject = msg_send![host, contentView];
-    let bounds: Rect = msg_send![content, bounds];
     let layout: Rect = msg_send![host, contentLayoutRect];
     let below_title: Rect = msg_send![content, convertRect: layout, fromView: std::ptr::null_mut::<AnyObject>()];
-    adopt(content, backdrop, bounds, std::ptr::null_mut());
+    // Backdrop only needs to letterbox behind the video itself — sizing it to the
+    // full window `bounds` instead of `below_title` put it over the title-bar
+    // strip too, above the webview, which silently ate title-bar drags whenever
+    // a player was embedded.
+    adopt(content, backdrop, below_title, std::ptr::null_mut());
     adopt(content, video, below_title, backdrop);
     let _: () = msg_send![player, orderOut: std::ptr::null_mut::<AnyObject>()];
     let _: () = msg_send![player, setLevel: NS_NORMAL_WINDOW_LEVEL];
