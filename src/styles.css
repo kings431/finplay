@@ -1071,6 +1071,18 @@ button.nav-btn { border: 0; background: none; }
 
 .search-page { padding-top: 36px; }
 .search-input { width: calc(100% - 112px); margin: 0 56px 18px; font-size: 18px; }
+/* TV: the keys sit left of the results, so letters and matches share the screen. */
+.search-split { display: grid; grid-template-columns: 420px minmax(0, 1fr); column-gap: 8px; align-items: start; }
+.search-split .osk-panel { position: sticky; top: 0; padding-bottom: 24px; }
+.search-split .search-input { width: calc(100% - 56px); margin: 0 0 16px 56px; }
+.search-split .search-results { min-width: 0; padding-top: 0; }
+.osk { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 0 0 0 56px; width: calc(100% - 56px); }
+.osk-key {
+  height: 56px; min-width: 0; padding: 0; border: 0; border-radius: 12px; font-size: 22px; font-weight: 600; text-transform: uppercase;
+  background: rgb(var(--fg-rgb) / 0.08); color: var(--fg);
+}
+.osk-key.wide { grid-column: span 2; font-size: 16px; text-transform: none; letter-spacing: 0.02em; }
+[data-couch] .osk-key:focus { outline: none; background: var(--fg); color: var(--bg); }
 .search-recent { padding-top: 4px; contain-intrinsic-size: 1px 90px; contain-intrinsic-size: auto 90px; }
 .search-recent .row-head { margin-bottom: 12px; }
 .results { display: flex; flex-direction: column; padding: 0 48px; }

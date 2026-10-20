@@ -4,6 +4,7 @@ import { markRequested, SeerrCard, useSeerrPicker } from "../components/RequestS
 import { useCached } from "../cache";
 import type { Jellyfin } from "../jellyfin";
 import { useClient, useSession } from "../session";
+import { tv } from "../tv";
 import type { BaseItem, SeerrResult } from "../types";
 
 type Results = { movies: BaseItem[]; shows: BaseItem[]; episodes: BaseItem[]; other: BaseItem[] };
@@ -35,6 +36,32 @@ async function suggestions(client: Jellyfin) {
       .catch(() => [] as BaseItem[]);
   const [movies, shows] = await Promise.all([pick("Movie"), pick("Series")]);
   return { movies, shows };
+}
+
+const LETTERS = "abcdefghijklmnopqrstuvwxyz1234567890".split("");
+
+/** A TV's own keyboard takes OK, typing, Done and a second look at the results
+ * for every word. These keys sit beside the results instead, which update as
+ * letters go in. */
+function Keys({ onType }: { onType: (change: (term: string) => string) => void }) {
+  return (
+    <div className="osk" role="group" aria-label="Keyboard">
+      {LETTERS.map((letter) => (
+        <button key={letter} type="button" className="osk-key" onClick={() => onType((term) => term + letter)}>
+          {letter}
+        </button>
+      ))}
+      <button type="button" className="osk-key wide" onClick={() => onType((term) => (term && !term.endsWith(" ") ? term + " " : term))}>
+        space
+      </button>
+      <button type="button" className="osk-key wide" onClick={() => onType((term) => term.slice(0, -1))}>
+        delete
+      </button>
+      <button type="button" className="osk-key wide" onClick={() => onType(() => "")}>
+        clear
+      </button>
+    </div>
+  );
 }
 
 export function Search() {
@@ -105,13 +132,7 @@ export function Search() {
   const requestable = idle ? [] : remote;
   const nothing = movies.length + shows.length + episodes.length + other.length + requestable.length === 0;
 
-  return (
-    <div
-      className="page search-page"
-      onClickCapture={(event) => {
-        if (!idle && event.target instanceof Element && event.target.closest(".row")) remember();
-      }}
-    >
+  const input = (
       <input
         className="search-input"
         autoFocus
@@ -119,7 +140,7 @@ export function Search() {
         onChange={(event) => setTerm(event.target.value)}
         onKeyDown={(event) => {
           // The box spans the page, so spatial focus would land mid-row; start rows at their first card.
-          if (event.key !== "ArrowDown" || !document.documentElement.hasAttribute("data-couch")) return;
+          if (tv || event.key !== "ArrowDown" || !document.documentElement.hasAttribute("data-couch")) return;
           const first = document.querySelector<HTMLElement>(".search-page .row .chips button, .search-page .row .row-track button");
           if (!first) return;
           event.preventDefault();
@@ -127,6 +148,9 @@ export function Search() {
         }}
         placeholder="Search movies, shows and episodes"
       />
+  );
+  const content = (
+    <>
       {idle ? (
         <>
           {recent.length > 0 ? (
@@ -202,6 +226,30 @@ export function Search() {
         </Row>
       ) : null}
       {picker.sheet}
+    </>
+  );
+
+  return (
+    <div
+      className={`page search-page${tv ? " search-split" : ""}`}
+      onClickCapture={(event) => {
+        if (!idle && event.target instanceof Element && event.target.closest(".row")) remember();
+      }}
+    >
+      {tv ? (
+        <>
+          <div className="osk-panel" data-down=".osk-key">
+            {input}
+            <Keys onType={setTerm} />
+          </div>
+          <div className="search-results">{content}</div>
+        </>
+      ) : (
+        <>
+          {input}
+          {content}
+        </>
+      )}
     </div>
   );
 }

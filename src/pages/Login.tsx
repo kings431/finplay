@@ -4,6 +4,7 @@ import { IconClose, Mark, Wordmark } from "../icons";
 import { Jellyfin, normalizeServer } from "../jellyfin";
 import { userImageUrl } from "../media";
 import { useSession, type StoredAuth } from "../session";
+import { tv } from "../tv";
 type PublicUser = Awaited<ReturnType<typeof Jellyfin.publicUsers>>[number];
 
 export function Login() {
@@ -55,10 +56,16 @@ function ProfileTile({ account, onPick, onForget }: { account: StoredAuth; onPic
   );
 }
 
+/** An address with something after the scheme, so the untouched "http://" doesn't count. */
+function serverReady(address: string) {
+  return /^https?:\/\/[^/\s]+/i.test(address.trim().replace(/^(?:https?:\/\/)+(https?:\/\/)/i, "$1"));
+}
+
 function SignIn({ onBack }: { onBack?: () => void }) {
   const { login, adopt, deviceFor } = useSession();
   const [server, setServer] = useState(localStorage.getItem("finplay.server") || "http://");
-  const [mode, setMode] = useState<"password" | "quick">("password");
+  // Typing a password with a remote is slow; Quick Connect only needs the server.
+  const [mode, setMode] = useState<"password" | "quick">(tv ? "quick" : "password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [users, setUsers] = useState<{ server: string; list: PublicUser[] }>({ server: "", list: [] });
@@ -84,6 +91,8 @@ function SignIn({ onBack }: { onBack?: () => void }) {
 
   useEffect(() => {
     void findUsers();
+    // A remembered server gets its code straight away.
+    if (tv && mode === "quick" && serverReady(server)) void startQuickConnect();
   }, []);
 
   function remember(address: string) {
@@ -165,7 +174,12 @@ function SignIn({ onBack }: { onBack?: () => void }) {
           <input
             value={server}
             onChange={(event) => setServer(event.target.value)}
-            onBlur={() => void findUsers()}
+            onBlur={() => {
+              void findUsers();
+              // With a remote, leaving the box after typing the address is the cue to ask for a code.
+              if (tv && mode === "quick" && !code && !busy && serverReady(server)) void startQuickConnect();
+            }}
+            inputMode="url"
             placeholder="http://192.168.1.20:8096"
             autoCapitalize="off"
             autoCorrect="off"
