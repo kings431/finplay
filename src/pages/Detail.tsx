@@ -24,6 +24,7 @@ import { ThemeMusic } from "../components/ThemeMusic";
 import { downloadImage, useDownloads } from "../downloads";
 import { inTauri } from "../player";
 import { usePlayback, type PlayOptions } from "../playback";
+import { tv } from "../tv";
 import { useSyncPlay } from "../syncplay";
 import { invalidate, useCached } from "../cache";
 import { useClient, useSession } from "../session";
@@ -226,7 +227,7 @@ export function Detail() {
   }
 
   const filterLink = (kind: "genre" | "studio", name: string) => (
-    <button key={name} className="filter-link" disabled={offline} onClick={() => void openFiltered(kind, name)} title={`More ${kind === "genre" ? name : `from ${name}`}`}>
+    <button key={name} className="filter-link" {...SKIP} disabled={offline} onClick={() => void openFiltered(kind, name)} title={`More ${kind === "genre" ? name : `from ${name}`}`}>
       {name}
     </button>
   );
@@ -278,7 +279,7 @@ export function Detail() {
       <div className="detail-hero">
         {backdrop ? <img src={backdrop} alt="" /> : null}
         <div className="hero-shade" />
-        <button className="btn-round back" onClick={() => (offline ? navigate("/downloads") : navigate(-1))} aria-label="Back">
+        <button className="btn-round back" {...SKIP} onClick={() => (offline ? navigate("/downloads") : navigate(-1))} aria-label="Back">
           <IconBack size={18} />
         </button>
         <div className="hero-copy">
@@ -490,6 +491,10 @@ export function Detail() {
   );
 }
 
+/** On a TV the remote's Back key is the back button, and genre, studio and per-episode
+ * "watched" controls are more stops than they're worth between the buttons and the episodes. */
+const SKIP = tv ? { "data-skip": "" } : {};
+
 const CREW_ROLES = ["Director", "Writer", "Creator", "Producer", "Composer"];
 
 function PeopleRow({ title, people }: { title: string; people: PersonCredit[] }) {
@@ -574,7 +579,7 @@ function EpisodeRow({
             {episode.Name}
           </strong>
           {onToggle ? (
-            <button className={`mini-check ${played ? "on" : ""}`} onClick={(event) => onToggle(!played, event)} title={played ? "Mark unwatched" : "Mark watched"}>
+            <button className={`mini-check ${played ? "on" : ""}`} {...SKIP} onClick={(event) => onToggle(!played, event)} title={played ? "Mark unwatched" : "Mark watched"}>
               <IconCheck size={15} />
             </button>
           ) : null}

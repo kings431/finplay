@@ -19,6 +19,88 @@ const held: Record<string, number> = {};
 const REPEAT_MS = 120;
 let lastMove = 0;
 
+/** What a page looked like when the remote left it: the control that had focus
+ * and how far the page was scrolled. Back puts both back, so a long Home page
+ * isn't lost to the first card every time. */
+type Mark = { row: string; label: string; index: number };
+type Place = { hash: string; mark: Mark; top: number };
+const places = new Map<string, Place>();
+const PLACES_MAX = 20;
+/** How long Back keeps looking for a card on a page that is still filling in. */
+const RESTORE_MS = 5000;
+let here: Place | null = null;
+let returning = false;
+let restore: { place: Place; until: number } | null = null;
+
+function mark(element: HTMLElement): Mark {
+  const row = element.closest(".row");
+  const siblings = element.parentElement ? [...element.parentElement.children] : [];
+  return {
+    row: row?.querySelector("h2")?.textContent?.trim() ?? "",
+    label: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 80),
+    index: siblings.indexOf(element),
+  };
+}
+
+function hashOf(url: string) {
+  const at = url.indexOf("#");
+  return at < 0 ? "" : url.slice(at);
+}
+
+/** Remembers the page being left, and arms the restore when Back caused it. */
+function onHashChange(event: HashChangeEvent) {
+  const left = hashOf(event.oldURL);
+  if (here && here.hash === left) {
+    places.delete(left);
+    places.set(left, here);
+    if (places.size > PLACES_MAX) places.delete(places.keys().next().value as string);
+  }
+  const place = returning ? places.get(window.location.hash) : undefined;
+  returning = false;
+  restore = place ? { place, until: performance.now() + RESTORE_MS } : null;
+  here = null;
+}
+
+/** Keeps the scroll position of the page the remote is on. */
+function onScroll(event: Event) {
+  if (here && here.hash === window.location.hash && event.target instanceof HTMLElement && event.target.matches(".main")) here.top = event.target.scrollTop;
+}
+
+/** The control Back left from, if the page has drawn it. A row's later cards
+ * mount as focus nears them, so a missing card falls back to its row's last
+ * one, which brings the rest in for the next try. */
+function findMark(wanted: Mark) {
+  const main = document.querySelector<HTMLElement>(".main");
+  if (!main) return null;
+  const controls = [...main.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((element) => !element.closest(".row-nav"));
+  const same = (element: HTMLElement) => {
+    const found = mark(element);
+    return found.row === wanted.row && found.label === wanted.label;
+  };
+  const exact = controls.find(same) ?? (wanted.row ? null : controls.find((element) => mark(element).label === wanted.label));
+  if (exact) return { element: exact, exact: true };
+  const inRow = controls.filter((element) => mark(element).row === wanted.row && wanted.row);
+  const last = inRow[inRow.length - 1];
+  return last ? { element: last, exact: false } : null;
+}
+
+function restorePlace() {
+  if (!restore) return false;
+  if (performance.now() > restore.until) {
+    restore = null;
+    return false;
+  }
+  const main = document.querySelector<HTMLElement>(".main");
+  if (!main) return false;
+  // Scrolling is what brings the later rows in, so keep asking for it.
+  if (main.scrollTop < restore.place.top) main.scrollTop = restore.place.top;
+  const found = findMark(restore.place.mark);
+  if (!found) return false;
+  focus(found.element, true);
+  if (found.exact) restore = null;
+  return true;
+}
+
 /** Where a focused row's top sits, as a share of the page's height. */
 const ROW_TOP = 0.12;
 
@@ -30,7 +112,8 @@ const LANE_SLACK = 40;
 
 function shown(element: Element) {
   const style = getComputedStyle(element);
-  return style.visibility !== "hidden" && style.display !== "none" && !element.closest("[inert], [aria-hidden='true']");
+  // `data-skip` marks controls a remote can leave out (they stay clickable and tabbable).
+  return style.visibility !== "hidden" && style.display !== "none" && !element.closest("[inert], [aria-hidden='true'], [data-skip]");
 }
 
 function visible(element: Element) {
@@ -219,6 +302,7 @@ export function scrollsInstantly() {
 function focus(element: HTMLElement, instant = false) {
   element.focus({ preventScroll: true });
   const main = document.querySelector<HTMLElement>(".main");
+  if (main?.contains(element)) here = { hash: window.location.hash, mark: mark(element), top: main.scrollTop };
   if (!main?.contains(element)) {
     element.scrollIntoView({ block: "nearest", inline: "nearest" });
     return;
@@ -259,6 +343,7 @@ function first() {
 
 /** Remotes have no pointer, so a new screen starts with its first control focused. */
 export function focusFirst() {
+  if (restore && restorePlace()) return;
   const current = document.activeElement;
   const root = scope();
   // Just after a move focus is where the remote put it, and measuring it now
@@ -315,6 +400,39 @@ export function move(direction: Direction, instant = false) {
   }
 }
 
+/** The stops a title or Home page is made of, top to bottom. Channel and Page
+ * Up/Down hop between them instead of stepping through every control. */
+const SECTIONS = ".hero-actions, .detail-section .episode.next, .detail-section .row-track, .detail-section .episode-list, .row .row-track";
+
+function jump(step: 1 | -1) {
+  const main = document.querySelector<HTMLElement>(".main");
+  const current = document.activeElement;
+  if (!main || !(current instanceof HTMLElement) || !main.contains(current)) return false;
+  const spots: { section: HTMLElement; target: HTMLElement }[] = [];
+  for (const section of main.querySelectorAll<HTMLElement>(SECTIONS)) {
+    if (section.parentElement?.closest(SECTIONS)) continue;
+    const controls = [...section.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(visible);
+    // A row lands where it was last left (the open season, the focused card's neighbour), else on its first control.
+    const target = controls.find((control) => control.matches(".on, .current, .current *")) ?? controls[0];
+    if (target) spots.push({ section, target });
+  }
+  if (spots.length < 2) return false;
+  let at = spots.findIndex((spot) => spot.section.contains(current));
+  if (at < 0) {
+    // Between sections (a link above the buttons, a heading): count those before it.
+    const before = spots.filter((spot) => spot.section.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING).length;
+    at = step > 0 ? before - 1 : before;
+  }
+  const next = spots[at + step];
+  if (next) focus(next.target);
+  else if (step < 0) {
+    const start = first();
+    if (start) focus(start);
+    glideTo(main, "top", 0);
+  }
+  return true;
+}
+
 /** Left and right step through a dropdown's options in place, so a remote can
  * change it without opening the list. Returns false at either end. */
 function cycle(select: HTMLSelectElement, direction: Direction) {
@@ -327,6 +445,14 @@ function cycle(select: HTMLSelectElement, direction: Direction) {
   return true;
 }
 
+/** A remote with only arrows (the Samsung Smart Remote) holds Up or Down to
+ * travel far: after this many steps a held key hops a whole section at a time,
+ * on a page made of sections (a title's), where stepping is slow going. */
+const HOLD_STEPS = 6;
+const HOP_MS = 330;
+let heldSteps = 0;
+let lastHop = 0;
+
 /** Up and down always leave a dropdown; opening it would trap them in its list. */
 function navigate(direction: Direction, repeated: boolean) {
   if (repeated && performance.now() - lastMove < REPEAT_MS) return;
@@ -335,6 +461,16 @@ function navigate(direction: Direction, repeated: boolean) {
     // Past the last option a fresh press moves on; holding the key stops at the end.
     if (cycle(current, direction) || repeated) {
       lastMove = performance.now();
+      return;
+    }
+  }
+  if (direction === "up" || direction === "down") heldSteps = repeated ? heldSteps + 1 : 0;
+  else heldSteps = 0;
+  if (heldSteps > HOLD_STEPS && document.querySelector(".main .detail")) {
+    const now = performance.now();
+    if (now - lastHop < HOP_MS) return;
+    if (jump(direction === "down" ? 1 : -1)) {
+      lastHop = lastMove = now;
       return;
     }
   }
@@ -350,8 +486,29 @@ function back() {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     return;
   }
-  if (window.location.hash !== "#/" && window.location.hash !== "") window.history.back();
-  else if (tv) exitApp();
+  if (window.location.hash !== "#/" && window.location.hash !== "") {
+    returning = true;
+    // If there is nowhere to go back to, no hash change will clear this.
+    window.setTimeout(() => (returning = false), 1000);
+    window.history.back();
+    return;
+  }
+  // On Home, Back climbs out a step at a time (page top, then the sidebar) so a
+  // stray press deep in the page doesn't close the app.
+  const main = document.querySelector<HTMLElement>(".main");
+  const current = document.activeElement;
+  const start = first();
+  if (main && current instanceof HTMLElement && main.contains(current) && start && (main.scrollTop > 40 || current !== start)) {
+    focus(start);
+    glideTo(main, "top", 0);
+    return;
+  }
+  const rail = document.querySelector<HTMLElement>(".sidebar .nav-btn.active") ?? document.querySelector<HTMLElement>(".sidebar button, .sidebar a[href]");
+  if (rail && !(current instanceof HTMLElement && current.closest(".sidebar"))) {
+    focus(rail);
+    return;
+  }
+  if (tv) exitApp();
 }
 
 function onKey(event: KeyboardEvent) {
@@ -366,6 +523,8 @@ function onKey(event: KeyboardEvent) {
     if (typing && !tv && (direction === "left" || direction === "right")) return;
     event.preventDefault();
     navigate(direction, event.repeat);
+  } else if (!typing && (event.key === "ChannelDown" || event.key === "PageDown" || event.key === "ChannelUp" || event.key === "PageUp")) {
+    if (jump(event.key === "ChannelDown" || event.key === "PageDown" ? 1 : -1)) event.preventDefault();
   } else if ((event.key === "Backspace" && !typing) || event.key === "BrowserBack" || event.key === "GoBack") {
     event.preventDefault();
     back();
@@ -439,10 +598,14 @@ export function applyCouch(next: boolean) {
   document.documentElement.toggleAttribute("data-couch", next);
   window.removeEventListener("keydown", onKey);
   window.removeEventListener("gamepadconnected", onPad);
+  window.removeEventListener("hashchange", onHashChange);
+  document.removeEventListener("scroll", onScroll, true);
   if (frame) window.clearTimeout(frame);
   frame = 0;
   if (!next) return;
   window.addEventListener("keydown", onKey);
   window.addEventListener("gamepadconnected", onPad);
+  window.addEventListener("hashchange", onHashChange);
+  document.addEventListener("scroll", onScroll, { capture: true, passive: true });
   onPad();
 }

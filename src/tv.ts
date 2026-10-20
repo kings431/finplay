@@ -27,6 +27,8 @@ const KEYS: Record<number, string> = {
   413: "MediaStop",
   417: "MediaFastForward",
   412: "MediaRewind",
+  427: "ChannelUp",
+  428: "ChannelDown",
   10232: "MediaTrackPrevious",
   10233: "MediaTrackNext",
   // The on-screen keyboard's Done and Cancel.
@@ -102,7 +104,7 @@ export function installTv(focusFirst: () => void) {
 function registerMediaKeys() {
   const device = tizen()?.tvinputdevice;
   if (!device) return;
-  let names = Object.values(KEYS).filter((name) => name.startsWith("Media"));
+  let names = Object.values(KEYS).filter((name) => name.startsWith("Media") || name.startsWith("Channel"));
   try {
     const supported = new Set((device.getSupportedKeys?.() ?? []).map((key) => key.name));
     if (supported.size) names = names.filter((name) => supported.has(name));
