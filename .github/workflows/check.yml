@@ -1,0 +1,80 @@
+name: Check
+
+# Builds and checks every branch except main (main is covered by Release on tags).
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type-check and build (desktop)
+        run: npm run build
+      - name: Build (TV, Chromium 85 target)
+        run: npx vite build --mode tv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-head
+          path: dist
+      # The same build of main, so the branch can be compared against it.
+      - name: Build main for comparison
+        run: |
+          git worktree add ../base origin/main
+          cd ../base
+          npm ci
+          npx vite build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-base
+          path: ../base/dist
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev
+      # tauri-build checks that bundled resources exist; the real ones are fetched by Release.
+      - name: Placeholder resources and frontend
+        shell: bash
+        run: |
+          mkdir -p dist src-tauri/mpv src-tauri/libmpv
+          echo '<!doctype html><title>Finplay</title>' > dist/index.html
+          touch src-tauri/mpv/.placeholder src-tauri/libmpv/.placeholder
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: clippy (report only)
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets
