@@ -2115,11 +2115,21 @@ mod linux_embed {
             last_w: w0,
             last_h: h0,
         });
-        // Poll the root pointer while held. mpv mouse-pos is window-relative, so once
-        // the window tracks the cursor the relative delta goes to ~0 and move events stop.
+        // Poll the root pointer while held, on one connection reused for the whole
+        // drag. mpv mouse-pos is window-relative, so once the window tracks the
+        // cursor the relative delta goes to ~0 and move events stop; reconnecting
+        // per tick (as this used to) also meant every "finplay-win move" message
+        // from mpv's MOUSE_MOVE handler did its own blocking X11 round-trip
+        // *inline on the mpv-IPC reader thread*, which also carries pause/seek/
+        // status traffic — a fast mouse could flood that thread faster than it
+        // could service both, so the window visibly caught up in jumps instead of
+        // tracking smoothly. This poller is now the sole driver (see
+        // `win_drag_move`, which just updates `dir`).
         thread::spawn(|| {
+            let Some((conn, screen)) = connect() else { return };
+            let Some(root) = root_of(&conn, screen) else { return };
             while WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-                win_drag_tick();
+                win_drag_tick(&conn, root);
                 thread::sleep(Duration::from_millis(8));
             }
         });
@@ -2141,17 +2151,18 @@ mod linux_embed {
         let _ = arm_drag(&conn, root, window, dir, true);
     }
 
+    /// Only updates the resize direction; the background poller in `arm_drag`
+    /// drives the actual move/resize, so this never touches X11 (it runs inline
+    /// on the mpv-IPC reader thread, which must stay free for status/control
+    /// traffic — see the comment in `arm_drag`).
     pub fn win_drag_move(dir: u32, _dx: i32, _dy: i32) {
         if let Some(drag) = WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             drag.dir = dir;
         }
-        win_drag_tick();
     }
 
-    fn win_drag_tick() {
-        let Some((conn, screen)) = connect() else { return };
-        let Some(root) = root_of(&conn, screen) else { return };
-        let Some((ptr_x, ptr_y)) = pointer_root(&conn, root) else { return };
+    fn win_drag_tick(conn: &impl Connection, root: Window) {
+        let Some((ptr_x, ptr_y)) = pointer_root(conn, root) else { return };
         let mut guard = WIN_DRAG.lock().unwrap_or_else(|e| e.into_inner());
         let Some(drag) = guard.as_mut() else { return };
         let dx = ptr_x - drag.ptr_x0;

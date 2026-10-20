@@ -28,13 +28,14 @@ const Requests = lazy(() => import("./pages/Requests").then((page) => ({ default
 const LiveTv = lazy(() => import("./pages/LiveTv").then((page) => ({ default: page.LiveTv })));
 const Together = lazy(() => import("./pages/Together").then((page) => ({ default: page.Together })));
 const Settings = lazy(() => import("./pages/Settings").then((page) => ({ default: page.Settings })));
-import { Mark } from "./icons";
+import { Mark, Wordmark } from "./icons";
 import { tv } from "./tv";
 
 function Splash() {
   return (
     <div className="splash">
       <Mark size={72} />
+      <Wordmark height={30} />
     </div>
   );
 }
