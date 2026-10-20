@@ -126,7 +126,7 @@ jobs:
           ./src-tauri/target/debug/finplay > /tmp/app.log 2>&1 & APP=$!
           SOCK=/tmp/finplay-$APP.sock
           for i in $(seq 1 60); do [ -S $SOCK ] && break; sleep 1; done
-          note(){ echo "::notice title=linux smoke::$1"; echo "$1"; }
+          note(){ echo "$1" | tee -a /tmp/notes.txt; }
           [ -S $SOCK ] && note "mpv control socket up after ${i}s" || { note "FAIL no mpv socket"; tail -30 /tmp/app.log; exit 1; }
           q(){ echo "{\"command\":$1,\"request_id\":1}" | socat -t 2 - UNIX-CONNECT:$SOCK | grep '"request_id":1' | head -1 | jq -c .data; }
           sleep 4
@@ -149,8 +149,11 @@ jobs:
           kill -0 $APP && note "app still running" || note "FAIL app exited"
           pgrep -x mpv >/dev/null && note "mpv still running" || note "mpv not running"
           note "app log errors: $(grep -ciE 'error|panic' /tmp/app.log)"
-          grep -iE 'error|panic' /tmp/app.log | head -5 | while read -r l; do echo "::notice title=app log::$l"; done
-          kill $APP; sleep 2
+          grep -iE 'error|panic|warn' /tmp/app.log | sort | uniq -c | sort -rn | head -6 | while read -r l; do note "log: $l"; done
+          kill $APP; sleep 3
           pgrep -x mpv >/dev/null && note "FAIL mpv left running after app quit" || note "mpv closed with the app"
+          [ -e $SOCK ] && note "socket file left behind" || note "socket cleaned up"
+          split -l 4 /tmp/notes.txt /tmp/chunk.
+          for f in /tmp/chunk.*; do echo "::notice title=linux smoke::$(paste -sd '|' $f)"; done
           SH
           dbus-run-session -- xvfb-run -a -s "-screen 0 1440x900x24" bash /tmp/smoke.sh
