@@ -34,14 +34,14 @@ jobs:
       # The same build of main, so the branch can be compared against it.
       - name: Build main for comparison
         run: |
-          git worktree add ../base origin/main
-          cd ../base
+          git worktree add .base origin/main
+          cd .base
           npm ci
           npx vite build
       - uses: actions/upload-artifact@v4
         with:
           name: dist-base
-          path: ../base/dist
+          path: .base/dist
 
   rust:
     strategy:
