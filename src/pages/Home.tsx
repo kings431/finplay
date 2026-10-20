@@ -18,8 +18,8 @@ const NO_COUNT = { EnableTotalRecordCount: "false" };
 const DECADES = [1970, 1980, 1990, 2000, 2010];
 const GENRE_ROWS = 6;
 const DISCOVERY_MAX_AGE = 20 * 60 * 1000;
-/** Ratings barely move, and sorting the whole library by them is the slowest query on Home. */
-const TOP_MAX_AGE = 6 * 60 * 60 * 1000;
+/** Sorting the whole library by rating is the slowest query on Home, but watching something should drop it from the row soon. */
+const TOP_MAX_AGE = 30 * 60 * 1000;
 const HERO_INTERVAL = 7000;
 const HERO_COUNT = 8;
 const HERO_LEAD: Partial<Record<HeroSource, number>> = { resume: 2, nextUp: 1 };
@@ -70,7 +70,7 @@ export function Home() {
   const movies = data?.movies ?? [];
   const shows = data?.shows ?? [];
   const more = useCached(`home-more:${session.userId}`, () => discoveryRows(client), { maxAge: DISCOVERY_MAX_AGE, persist: true });
-  const topTen = useCached(`home-top:${session.userId}`, () => topRow(client), { maxAge: TOP_MAX_AGE, persist: true });
+  const topTen = useCached(`home-top:${session.userId}:${dayNumber()}`, () => topRow(client), { maxAge: TOP_MAX_AGE, persist: true });
   const discover = useCached(session.seerr ? `home-discover:${session.userId}` : null, () =>
     client.seerrDiscover("trending").then((found) => (found.results ?? []).filter((result) => result.mediaType === "movie" || result.mediaType === "tv")),
   );
@@ -378,12 +378,48 @@ async function discoveryRows(client: Jellyfin): Promise<HomeRow[]> {
   return rows.filter((row): row is HomeRow => Boolean(row && row.items.length >= (row.min ?? 5)));
 }
 
+/** Whole days since the epoch in local time, so the Top 10 turns over at midnight. */
+function dayNumber() {
+  const now = new Date();
+  return Math.floor((now.getTime() - now.getTimezoneOffset() * 60000) / 86400000);
+}
+
+type TopLens = { title: string; subtitle: string; query: { includeItemTypes: string; genres?: string; years?: string } };
+
+/** Today's lens on the ranking: everything, then movies, shows, a genre and a decade in turn. */
+function topLens(day: number, genreNames: string[], serverName: string): TopLens {
+  const where = serverName ? `on ${serverName}` : "on your server";
+  const kind = day % 5;
+  if (kind === 1) return { title: `Top 10 Movies ${where}`, subtitle: "Highest rated you haven't seen", query: { includeItemTypes: "Movie" } };
+  if (kind === 2) return { title: `Top 10 Shows ${where}`, subtitle: "Highest rated you haven't seen", query: { includeItemTypes: "Series" } };
+  const cycle = Math.floor(day / 5);
+  if (kind === 3 && genreNames.length) {
+    const genre = genreNames[cycle % genreNames.length];
+    return { title: `Top 10 ${genre} ${where}`, subtitle: "Highest rated you haven't seen", query: { includeItemTypes: BROWSE, genres: genre } };
+  }
+  if (kind === 4) {
+    const decade = DECADES[cycle % DECADES.length];
+    return { title: `Top 10 of the ${decade}s ${where}`, subtitle: "Highest rated you haven't seen", query: { includeItemTypes: BROWSE, years: decadeYears(decade) } };
+  }
+  return { title: `Top 10 ${where}`, subtitle: "Highest rated you haven't seen", query: { includeItemTypes: BROWSE } };
+}
+
 async function topRow(client: Jellyfin): Promise<HomeRow> {
-  const [serverName, top] = await Promise.all([
+  const [serverName, genreList] = await Promise.all([
     client.serverName().catch(() => ""),
-    items(client.items({ slim: true, includeItemTypes: BROWSE, sortBy: "CommunityRating,SortName", sortOrder: "Descending", limit: 10, extra: { MinCommunityRating: "1", ...NO_COUNT } })),
+    items(client.genres(undefined, BROWSE)),
   ]);
-  return { key: "top", title: serverName ? `Top 10 on ${serverName}` : "Top 10 on your server", subtitle: "Highest rated", kind: "rank", items: top };
+  const genreNames = genreList.map((genre) => genre.Name).sort();
+  const ranked = (query: TopLens["query"]) =>
+    items(client.items({ slim: true, ...query, filters: "IsUnplayed", sortBy: "CommunityRating,SortName", sortOrder: "Descending", limit: 10, extra: { MinCommunityRating: "1", ...NO_COUNT } }));
+  const lens = topLens(dayNumber(), genreNames, serverName);
+  const top = await ranked(lens.query);
+  // A narrow lens on a small library can come up short; fall back to the whole library.
+  if (top.length < 5) {
+    const all = topLens(0, genreNames, serverName);
+    return { key: "top", title: all.title, subtitle: all.subtitle, kind: "rank", items: await ranked(all.query) };
+  }
+  return { key: "top", title: lens.title, subtitle: lens.subtitle, kind: "rank", items: top };
 }
 
 function items(request: Promise<ItemList>) {
