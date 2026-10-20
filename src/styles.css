@@ -325,6 +325,9 @@ button.nav-btn { border: 0; background: none; }
 /* Native mpv covers the window; hide the caption strip so it does not peek through. */
 [data-native-playing] { --titlebar: 0px; }
 [data-native-playing] .titlebar { display: none; }
+/* Mac has no caption buttons and the strip is its only drag handle (the native
+   backdrop above it is click-through), so keep it, invisible, while playing. */
+.platform-mac[data-native-playing] .titlebar { display: flex; height: 28px; }
 .titlebar-controls { display: flex; height: 100%; }
 .titlebar-controls button {
   width: 46px;

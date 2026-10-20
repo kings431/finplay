@@ -13,7 +13,7 @@
 use libloading::Library;
 use objc2::encode::{Encode, Encoding};
 use objc2::msg_send;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -227,6 +227,17 @@ unsafe impl Encode for Rect {
     );
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+unsafe impl Encode for Point {
+    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+
 const NS_WINDOW_ABOVE: isize = 1;
 const NS_VIEW_WIDTH_SIZABLE: usize = 1 << 1;
 const NS_VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
@@ -333,8 +344,29 @@ unsafe fn video_view(player: *mut AnyObject) -> Option<*mut AnyObject> {
     first
 }
 
+/// A plain NSView that never claims a click: hit-testing falls through to the
+/// view underneath, so the backdrop can black out the whole window (title bar
+/// strip included) without eating title-bar drags and clicks.
+fn backdrop_class() -> &'static AnyClass {
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        extern "C" fn hit_test(_this: *mut AnyObject, _sel: Sel, _point: Point) -> *mut AnyObject {
+            std::ptr::null_mut()
+        }
+        let mut builder = ClassBuilder::new(c"FinplayBackdrop", objc2::class!(NSView))
+            .expect("FinplayBackdrop class registered twice");
+        unsafe {
+            builder.add_method(
+                objc2::sel!(hitTest:),
+                hit_test as extern "C" fn(*mut AnyObject, Sel, Point) -> *mut AnyObject,
+            );
+        }
+        builder.register()
+    })
+}
+
 unsafe fn make_backdrop() -> *mut AnyObject {
-    let view: *mut AnyObject = msg_send![objc2::class!(NSView), alloc];
+    let view: *mut AnyObject = msg_send![backdrop_class(), alloc];
     let zero = Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
     let view: *mut AnyObject = msg_send![view, initWithFrame: zero];
     let _: () = msg_send![view, setWantsLayer: true];
@@ -386,13 +418,13 @@ unsafe fn place(embed: Embed) {
     }
     MINI_PLACED.store(false, Ordering::SeqCst);
     let content: *mut AnyObject = msg_send![host, contentView];
+    let bounds: Rect = msg_send![content, bounds];
     let layout: Rect = msg_send![host, contentLayoutRect];
     let below_title: Rect = msg_send![content, convertRect: layout, fromView: std::ptr::null_mut::<AnyObject>()];
-    // Backdrop only needs to letterbox behind the video itself — sizing it to the
-    // full window `bounds` instead of `below_title` put it over the title-bar
-    // strip too, above the webview, which silently ate title-bar drags whenever
-    // a player was embedded.
-    adopt(content, backdrop, below_title, std::ptr::null_mut());
+    // The backdrop covers the whole window so the page behind the player (home
+    // screen, nav) never shows through the title-bar strip. It is click-through
+    // (see `backdrop_class`), so title-bar dragging still reaches the webview.
+    adopt(content, backdrop, bounds, std::ptr::null_mut());
     adopt(content, video, below_title, backdrop);
     let _: () = msg_send![player, orderOut: std::ptr::null_mut::<AnyObject>()];
     let _: () = msg_send![player, setLevel: NS_NORMAL_WINDOW_LEVEL];
