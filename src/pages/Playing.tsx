@@ -4,6 +4,7 @@ import { audioStreams, backdropUrl, formatClock, isTextSubtitle, streamLabel, su
 import { inTauri, playerRequest } from "../player";
 import { methodHint, usePlayback, usePlaybackClock, type ActivePlayback, type StreamChange } from "../playback";
 import { useSession } from "../session";
+import { tv } from "../tv";
 import { QUALITY_RATES, loadSettings } from "../settings";
 import { trickplayFrame, trickplaySource, trickplayTileUrl, type TrickplaySource } from "../trickplay";
 import { webNextTitle, webPlayNext, webSegment } from "../webplayer";
@@ -16,6 +17,8 @@ export function Playing() {
 
 const OSD_IDLE_MS = 5000;
 const SEGMENT_LABELS: Record<string, string> = { Intro: "Skip intro", Recap: "Skip recap", Preview: "Skip preview", Outro: "Skip credits" };
+/** On a TV, Back needs a second press this soon after the first to leave the video. */
+const EXIT_ARM_MS = 3000;
 /** Scrubbing waits this long after the last press before it seeks. */
 const SCRUB_COMMIT_MS = 700;
 /** A tile sheet decodes to about 23 MB, too much to keep many on a TV. */
@@ -176,6 +179,8 @@ function WebPlaying() {
   /** "Switching audio…" while a change is under way, or why it failed. */
   const [note, setNote] = useState("");
   const noteTimer = useRef(0);
+  /** When a first Back on a TV stops counting as a warning, so a stray press doesn't end the video. */
+  const exitArmed = useRef(0);
   const positionRef = useRef(position);
   positionRef.current = position;
   const durationRef = useRef(duration);
@@ -351,7 +356,15 @@ function WebPlaying() {
       if (back) {
         consume();
         if (scrubRef.current) cancelScrub();
-        else void stop();
+        else if (!tv || finished || durationRef.current <= 0 || performance.now() < exitArmed.current) void stop();
+        else {
+          // Back is easy to hit by accident on a remote; ask once before leaving.
+          exitArmed.current = performance.now() + EXIT_ARM_MS;
+          window.clearTimeout(noteTimer.current);
+          setNote("Press Back again to exit");
+          noteTimer.current = window.setTimeout(() => setNote(""), EXIT_ARM_MS);
+          wake();
+        }
       } else if (key === "MediaPlayPause" || key === " ") {
         consume();
         commit();
@@ -375,10 +388,12 @@ function WebPlaying() {
         if (!onBar) focusBar();
         nudge(key === "ArrowRight" ? 1 : -1, 10);
       } else if (key === "ArrowDown" && onBar && shownRef.current) {
-        // The transport row is wider than the bar, so pick Play/Pause rather
-        // than whichever button sits nearest.
+        // The transport row is wider than the bar, so pick a button rather than
+        // whichever sits nearest: OK on the bar already pauses, so go straight to
+        // Subtitles, the control reached most often.
         consume();
-        playButton.current?.focus({ preventScroll: true });
+        const subtitles = document.querySelector<HTMLButtonElement>('.web-osd .web-track-btn[data-kind="subtitles"]');
+        (subtitles ?? playButton.current)?.focus({ preventScroll: true });
         wake();
       } else if (key === "ArrowUp" && shownRef.current && document.activeElement?.closest(".web-osd .transport")) {
         consume();
@@ -409,7 +424,7 @@ function WebPlaying() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("pointermove", wake);
     };
-  }, [stop, togglePause, wake, commit, cancelScrub, nudge, focusBar, closeMenu]);
+  }, [stop, togglePause, wake, commit, cancelScrub, nudge, focusBar, closeMenu, finished]);
 
   const segment = webSegment(position);
   const nextTitle = webNextTitle();
@@ -531,6 +546,7 @@ function WebPlaying() {
           {menus.map((entry) => (
             <button
               key={entry.kind}
+              data-kind={entry.kind}
               className={`web-track-btn${menu === entry.kind ? " on" : ""}`}
               aria-haspopup="menu"
               aria-expanded={menu === entry.kind}
