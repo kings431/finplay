@@ -92,3 +92,65 @@ jobs:
           comm -13 base.txt head.txt | head -8 | while read -r line; do echo "::warning title=new clippy ${{ matrix.platform }}::$line"; done
           comm -23 base.txt head.txt | head -8 | while read -r line; do echo "::notice title=fixed clippy ${{ matrix.platform }}::$line"; done
           exit 0
+
+  # Launches the real desktop app on a virtual display with embedded mpv
+  # (FINPLAY_TEST_PLAY), then drives the player over its control socket.
+  linux-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev \
+            mpv xvfb socat ffmpeg imagemagick libgl1-mesa-dri dbus-x11 jq
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npx vite build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Build debug app
+        working-directory: src-tauri
+        run: cargo build --locked
+      - name: Run app with embedded mpv
+        shell: bash
+        run: |
+          ffmpeg -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=24 -f lavfi -i sine=frequency=440 -t 60 -c:v libx264 -pix_fmt yuv420p -c:a aac /tmp/test.mp4
+          export FINPLAY_TEST_PLAY=/tmp/test.mp4
+          cat > /tmp/smoke.sh <<'SH'
+          set +e
+          ./src-tauri/target/debug/finplay > /tmp/app.log 2>&1 & APP=$!
+          SOCK=/tmp/finplay-$APP.sock
+          for i in $(seq 1 60); do [ -S $SOCK ] && break; sleep 1; done
+          note(){ echo "::notice title=linux smoke::$1"; echo "$1"; }
+          [ -S $SOCK ] && note "mpv control socket up after ${i}s" || { note "FAIL no mpv socket"; tail -30 /tmp/app.log; exit 1; }
+          q(){ echo "{\"command\":$1,\"request_id\":1}" | socat -t 2 - UNIX-CONNECT:$SOCK | grep '"request_id":1' | head -1 | jq -c .data; }
+          sleep 4
+          note "embedded with --wid: $(ps -o args= -C mpv | grep -c -- '--wid=')"
+          t1=$(q '["get_property","time-pos"]'); sleep 3; t2=$(q '["get_property","time-pos"]')
+          note "time-pos advancing: $t1 -> $t2"
+          v0=$(q '["get_property","volume"]')
+          for k in UP UP UP; do q "[\"keypress\",\"$k\"]" >/dev/null; done; sleep 0.5
+          v1=$(q '["get_property","volume"]')
+          q '["keypress","DOWN"]' >/dev/null; sleep 0.3; v2=$(q '["get_property","volume"]')
+          note "volume via overlay keys: start $v0, after UP x3 $v1, after DOWN $v2"
+          for i in $(seq 1 12); do q '["keypress","UP"]' >/dev/null; done; sleep 0.5
+          note "volume after 12 more UP (should clamp at 130): $(q '["get_property","volume"]')"
+          q '["keypress","SPACE"]' >/dev/null; sleep 0.5; note "paused after SPACE: $(q '["get_property","pause"]')"
+          q '["keypress","SPACE"]' >/dev/null; sleep 0.5
+          p1=$(q '["get_property","time-pos"]'); q '["keypress","RIGHT"]' >/dev/null; sleep 1; p2=$(q '["get_property","time-pos"]')
+          note "seek with RIGHT: $p1 -> $p2"
+          import -window root /tmp/screen.png 2>/dev/null
+          note "screen colours (blank = 1): $(convert /tmp/screen.png -format %k info: 2>/dev/null)"
+          kill -0 $APP && note "app still running" || note "FAIL app exited"
+          pgrep -x mpv >/dev/null && note "mpv still running" || note "mpv not running"
+          note "app log errors: $(grep -ciE 'error|panic' /tmp/app.log)"
+          grep -iE 'error|panic' /tmp/app.log | head -5 | while read -r l; do echo "::notice title=app log::$l"; done
+          kill $APP; sleep 2
+          pgrep -x mpv >/dev/null && note "FAIL mpv left running after app quit" || note "mpv closed with the app"
+          SH
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x900x24" bash /tmp/smoke.sh
