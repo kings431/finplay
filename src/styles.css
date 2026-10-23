@@ -681,7 +681,31 @@ button.nav-btn { border: 0; background: none; }
 .hky .guide-nav { padding: 0 56px; margin: 4px 0 14px; }
 .hky-days { padding-bottom: 14px; }
 .hky-days button { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
-.hky-days .chip-count { margin-left: 0; line-height: 1; }
+.hky-days /* Live TV guide preview: what the pointer or remote is on, with a muted look at the channel itself. */
+.guide-preview-toggle { margin-left: auto; }
+.gp { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 20px; align-items: start; padding: 14px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 16px; background: rgb(var(--fg-rgb) / 0.04); min-height: 150px; }
+.gp-idle { display: grid; place-items: center; grid-template-columns: 1fr; min-height: 60px; color: var(--muted); font-size: 14px; }
+.gp-screen { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: #000; display: grid; place-items: center; }
+.gp-screen > img, .gp-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.gp-screen > .gp-logo { object-fit: contain; width: 40%; left: 30%; }
+.gp-video { opacity: 0; transition: opacity 0.25s ease; background: #000; }
+.gp-video.on { opacity: 1; }
+.gp-live, .gp-status { position: absolute; z-index: 1; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; border-radius: 99px; padding: 3px 9px; background: rgb(0 0 0 / 0.6); color: #fff; }
+.gp-live { top: 8px; left: 8px; background: #dc2626; }
+.gp-status { bottom: 8px; left: 8px; font-weight: 600; letter-spacing: 0; }
+.gp-copy { display: grid; gap: 4px; min-width: 0; align-content: start; }
+.gp-copy small { color: var(--muted); font-size: 12.5px; }
+.gp-copy h3 { margin: 0; font-size: 20px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-copy p { margin: 0; }
+.gp-episode { color: var(--text-2); font-size: 14px; }
+.gp-time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.gp-bar { display: block; height: 4px; border-radius: 2px; background: rgb(var(--fg-rgb) / 0.14); overflow: hidden; margin: 4px 0; max-width: 360px; }
+.gp-bar span { display: block; height: 100%; background: var(--accent); }
+.gp-overview { color: var(--text-2); font-size: 13.5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; }
+.gp-next { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.gp-next b { color: var(--text-2); margin-right: 6px; }
+.with-preview .guide { max-height: calc(100 * var(--vh) - 230px - 200px); }
+.chip-count { margin-left: 0; line-height: 1; }
 .hky-games { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; padding: 10px 56px 24px; }
 .hky-game { display: grid; border: 1px solid var(--line); border-radius: 16px; background: rgb(var(--fg-rgb) / 0.04); overflow: hidden; }
 .hky-game.live { border-color: rgb(239 68 68 / 0.55); }

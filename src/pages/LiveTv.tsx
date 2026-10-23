@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCached } from "../cache";
 import { IconPlay } from "../icons";
-import { primaryUrl, tile } from "../media";
+import { primaryUrl, thumbUrl, tile } from "../media";
+import { useLivePreview, type PreviewState } from "../livePreview";
 import { usePlayback } from "../playback";
 import { useClient, useSession } from "../session";
 import { Hockey } from "./Hockey";
@@ -180,6 +181,65 @@ function LiveTiles({ channels, now, returnTo }: { channels: BaseItem[]; now: num
   );
 }
 
+function GuidePreview({
+  aimed,
+  programs,
+  state,
+  video,
+  now,
+  enabled,
+}: {
+  aimed: { channel: BaseItem; program?: BaseItem } | null;
+  programs: BaseItem[] | undefined;
+  state: PreviewState;
+  video: ReturnType<typeof useLivePreview>["props"];
+  now: number;
+  enabled: boolean;
+}) {
+  const session = useSession();
+  if (!aimed) return <div className="gp gp-idle">Point at a channel to see what's on{enabled ? "" : " (live preview is off)"}.</div>;
+  const { channel } = aimed;
+  const program = aimed.program ?? channel.CurrentProgram;
+  const art = program ? thumbUrl(session, program) ?? primaryUrl(session, program) : undefined;
+  const logo = primaryUrl(session, channel);
+  const airing = Boolean(program && Date.parse(program.StartDate ?? "") <= now && Date.parse(program.EndDate ?? "") > now);
+  const ends = Date.parse(program?.EndDate ?? "");
+  const next = programs?.find((entry) => Date.parse(entry.StartDate ?? "") >= ends - 1000 && entry.Id !== program?.Id);
+  return (
+    <div className="gp">
+      <div className="gp-screen" style={{ background: tile(channel.Name) }}>
+        {art ? <img src={art} alt="" /> : logo ? <img className="gp-logo" src={logo} alt="" /> : <b>{channel.ChannelNumber ?? channel.Name.slice(0, 3)}</b>}
+        <video className={`gp-video${state === "playing" ? " on" : ""}`} {...video} />
+        {state === "playing" ? <span className="gp-live">LIVE</span> : null}
+        {state === "loading" ? <span className="gp-status">Tuning in…</span> : null}
+        {state === "error" ? <span className="gp-status">Preview unavailable</span> : null}
+      </div>
+      <div className="gp-copy">
+        <small>{[channel.ChannelNumber, channel.Name].filter(Boolean).join(" ")}</small>
+        <h3>{program?.Name ?? channel.Name}</h3>
+        {program?.EpisodeTitle ? <p className="gp-episode">{program.EpisodeTitle}</p> : null}
+        {program ? (
+          <p className="gp-time">
+            {clock(program.StartDate)} – {clock(program.EndDate)}
+            {airing ? ` · ${timeLeft(program, now)}` : ""}
+          </p>
+        ) : null}
+        {airing ? (
+          <span className="gp-bar">
+            <span style={{ width: `${progressOf(program, now)}%` }} />
+          </span>
+        ) : null}
+        {program?.Overview ? <p className="gp-overview">{program.Overview}</p> : null}
+        {next ? (
+          <p className="gp-next">
+            <b>Next</b> {next.Name} · {clock(next.StartDate)}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function Guide({
   channels,
   back,
@@ -208,6 +268,17 @@ function Guide({
   }, []);
   const leaving = () =>
     back({ hours: String(offsetHours), top: String(Math.round(scroller.current?.scrollTop ?? 0)), left: String(Math.round(scroller.current?.scrollLeft ?? 0)) });
+  // What the pointer or remote is on, shown in the preview above the grid.
+  const [previewOn, setPreviewOn] = useState(() => localStorage.getItem("finplay.guidePreview") !== "off");
+  const [aimed, setAimed] = useState<{ channel: BaseItem; program?: BaseItem } | null>(null);
+  const preview = useLivePreview(client, aimed?.channel.Id ?? null, previewOn);
+  const aim = (channel: BaseItem, program?: BaseItem) =>
+    setAimed((current) => (current?.channel.Id === channel.Id && current.program?.Id === program?.Id ? current : { channel, program }));
+  // The preview gives its tuner back first, so it can't be what makes the real stream fail.
+  const watch = async (channel: BaseItem) => {
+    await preview.stop();
+    void play(channel, { fromStart: true, returnTo: leaving() });
+  };
   const start = useMemo(() => {
     const date = new Date();
     date.setMinutes(date.getMinutes() < 30 ? 0 : 30, 0, 0);
@@ -267,7 +338,7 @@ function Guide({
   };
 
   return (
-    <div className="guide-wrap">
+    <div className="guide-wrap with-preview">
       <div className="guide-nav">
         <button className="btn-ghost" disabled={offsetHours <= 0} onClick={() => setOffsetHours((value) => Math.max(0, value - 3))}>
           ‹ Earlier
@@ -276,7 +347,23 @@ function Guide({
         <button className="btn-ghost" disabled={offsetHours >= 7 * 24} onClick={() => setOffsetHours((value) => value + 3)}>
           Later ›
         </button>
+        <button
+          className="btn-ghost guide-preview-toggle"
+          aria-pressed={previewOn}
+          onClick={() => {
+            const next = !previewOn;
+            setPreviewOn(next);
+            try {
+              localStorage.setItem("finplay.guidePreview", next ? "on" : "off");
+            } catch {
+              // Private windows can refuse storage; the choice just lasts until the page closes.
+            }
+          }}
+        >
+          Live preview: {previewOn ? "on" : "off"}
+        </button>
       </div>
+      <GuidePreview aimed={aimed} programs={aimed ? data?.[aimed.channel.Id] : undefined} state={preview.state} video={preview.props} now={now} enabled={previewOn} />
       {error ? <p className="empty">{error}</p> : null}
       <div className="guide" ref={scroller}>
         <div className="guide-grid" style={{ width: width + 180 }}>
@@ -292,8 +379,8 @@ function Guide({
           {channels.slice(firstRow, lastRow).map((channel) => {
             const logo = primaryUrl(session, channel);
             return (
-              <div key={channel.Id} className="guide-row">
-                <button className="guide-channel" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: leaving() })} title={`Watch ${channel.Name}`}>
+              <div key={channel.Id} className="guide-row" onMouseEnter={() => aim(channel)}>
+                <button className="guide-channel" disabled={busy} onClick={() => void watch(channel)} onFocus={() => aim(channel)} title={`Watch ${channel.Name}`}>
                   {logo ? <img src={logo} alt="" loading="lazy" /> : null}
                   <span>
                     <b>{channel.ChannelNumber}</b> {logo ? "" : channel.Name}
@@ -310,7 +397,9 @@ function Guide({
                         className={`guide-program${airing ? " airing" : ""}`}
                         style={{ left: box.left, width: box.width }}
                         disabled={!airing || busy}
-                        onClick={() => airing && void play(channel, { fromStart: true, returnTo: leaving() })}
+                        onClick={() => airing && void watch(channel)}
+                        onMouseEnter={() => aim(channel, program)}
+                        onFocus={() => aim(channel, program)}
                         title={[program.Name, program.EpisodeTitle, program.Overview].filter(Boolean).join("\n\n")}
                       >
                         <strong>{program.Name}</strong>

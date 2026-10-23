@@ -11,7 +11,7 @@ import type {
   SeerrTv,
   SyncGroup,
 } from "./types";
-import { deviceProfile } from "./profile";
+import { deviceProfile, previewProfile } from "./profile";
 
 export type Auth = {
   server: string;
@@ -67,6 +67,9 @@ function authHeader(deviceId: string, token?: string) {
 const REQUEST_TIMEOUT = 30_000;
 /** Opening a live TV tuner or querying a big playback history can take a while. */
 const SLOW_REQUEST_TIMEOUT = 120_000;
+
+/** The guide preview is a thumbnail; this is plenty and light on the server. */
+const PREVIEW_BITRATE = 1_500_000;
 
 const LIST_FIELDS ="Overview,Genres,CommunityRating,OfficialRating,RunTimeTicks,ChildCount,PrimaryImageAspectRatio";
 /** Enough for poster and wide cards; overviews and genres are only shown in heroes and details. */
@@ -523,6 +526,28 @@ export class Jellyfin {
       },
       SLOW_REQUEST_TIMEOUT,
     );
+  }
+
+  /** A small HLS copy of a live channel, whatever this device would play itself, for the guide's preview. */
+  livePreview(channelId: string) {
+    return this.json<PlaybackInfo>(
+      `/Items/${channelId}/PlaybackInfo`,
+      {
+        UserId: this.auth.userId,
+        MaxStreamingBitrate: PREVIEW_BITRATE,
+        AutoOpenLiveStream: true,
+        EnableDirectPlay: false,
+        EnableDirectStream: false,
+        EnableTranscoding: true,
+        DeviceProfile: previewProfile(PREVIEW_BITRATE),
+      },
+      SLOW_REQUEST_TIMEOUT,
+    );
+  }
+
+  /** Gives a live channel's tuner back. Streams opened for a preview are never reported, so nothing else closes them. */
+  async closeLiveStream(liveStreamId: string) {
+    await this.send("POST", `/LiveStreams/Close?${new URLSearchParams({ liveStreamId })}`);
   }
 
   /** Ends the server's transcode for a stream this device has moved off. */

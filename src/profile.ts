@@ -4,6 +4,27 @@ export function deviceProfile(maxBitrate: number) {
   return inTauri() ? mpvProfile(maxBitrate) : webProfile(maxBitrate);
 }
 
+/** A small HLS stream any video element can play, for the guide's live preview. */
+export function previewProfile(maxBitrate: number) {
+  return {
+    ...webProfile(maxBitrate),
+    DirectPlayProfiles: [],
+    TranscodingProfiles: [
+      {
+        Container: "ts",
+        Type: "Video",
+        VideoCodec: "h264",
+        AudioCodec: "aac",
+        Protocol: "hls",
+        Context: "Streaming",
+        MaxAudioChannels: "2",
+        MinSegments: 1,
+        BreakOnNonKeyFrames: true,
+      },
+    ],
+  };
+}
+
 /** What this browser or TV says its video element decodes; the server
  * remuxes or transcodes the rest to HLS. Samsung TVs report their hardware
  * decoders through `canPlayType`, so this covers HEVC and Dolby audio there. */
