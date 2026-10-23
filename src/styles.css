@@ -678,9 +678,10 @@ button.nav-btn { border: 0; background: none; }
 .onair-bar span { display: block; height: 100%; background: var(--accent); }
 .onair-progress em { flex: none; font-style: normal; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* Live TV "Hockey": a day's games, each with the channels it is on. */
-.hky .guide-nav { padding: 0 56px; margin-bottom: 10px; }
-.hky-days button { display: inline-flex; align-items: baseline; }
-.hky-days .chip-count:last-child { min-width: 0; }
+.hky .guide-nav { padding: 0 56px; margin: 4px 0 14px; }
+.hky-days { padding-bottom: 14px; }
+.hky-days button { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.hky-days .chip-count { margin-left: 0; line-height: 1; }
 .hky-games { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; padding: 10px 56px 24px; }
 .hky-game { display: grid; border: 1px solid var(--line); border-radius: 16px; background: rgb(var(--fg-rgb) / 0.04); overflow: hidden; }
 .hky-game.live { border-color: rgb(239 68 68 / 0.55); }
