@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCached } from "../cache";
 import { IconPlay } from "../icons";
-import { primaryUrl, thumbUrl, tile } from "../media";
+import { primaryUrl, tile } from "../media";
 import { usePlayback } from "../playback";
 import { useClient, useSession } from "../session";
 import type { BaseItem } from "../types";
@@ -40,7 +40,8 @@ function progressOf(program: BaseItem | undefined, now: number) {
 
 export function LiveTv() {
   const client = useClient();
-  const [tab, setTab] = useState<"now" | "guide">("now");
+  // The guide is the better starting point, and where leaving a stream lands.
+  const [tab, setTab] = useState<"now" | "guide">("guide");
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]["id"]>("all");
   const { data, error, loading } = useCached("livetv:channels", async () => (await client.liveChannels()).Items ?? [], { maxAge: 60_000 });
   const channels = data ?? [];
@@ -54,11 +55,11 @@ export function LiveTv() {
           <p>{channels.length ? `${channels.length} channels` : "Channels from your Jellyfin tuners"}</p>
         </div>
         <div className="chips">
-          <button className={tab === "now" ? "on" : ""} onClick={() => setTab("now")}>
-            On now
-          </button>
           <button className={tab === "guide" ? "on" : ""} onClick={() => setTab("guide")}>
             Guide
+          </button>
+          <button className={tab === "now" ? "on" : ""} onClick={() => setTab("now")}>
+            On now
           </button>
         </div>
       </header>
@@ -68,13 +69,17 @@ export function LiveTv() {
       {channels.length && tab === "now" ? (
         <>
           <div className="chips">
-            {CATEGORIES.map((entry) => (
-              <button key={entry.id} className={category === entry.id ? "on" : ""} onClick={() => setCategory(entry.id)}>
-                {entry.label}
-              </button>
-            ))}
+            {CATEGORIES.map((entry) => {
+              const count = channels.filter((channel) => entry.match(channel.CurrentProgram)).length;
+              return (
+                <button key={entry.id} className={category === entry.id ? "on" : ""} onClick={() => setCategory(entry.id)} disabled={entry.id !== "all" && count === 0}>
+                  {entry.label}
+                  <small className="chip-count">{count}</small>
+                </button>
+              );
+            })}
           </div>
-          <OnNow channels={channels.filter((channel) => matcher(channel.CurrentProgram))} />
+          <OnNow channels={channels.filter((channel) => matcher(channel.CurrentProgram))} grouped={category === "all"} />
         </>
       ) : null}
       {channels.length && tab === "guide" ? <Guide channels={channels} /> : null}
@@ -82,40 +87,78 @@ export function LiveTv() {
   );
 }
 
-function OnNow({ channels }: { channels: BaseItem[] }) {
-  const session = useSession();
-  const { play, busy } = usePlayback();
+/** Where a channel's current programme is shown on "On now", first match wins. */
+const GROUPS = [
+  { id: "sports", label: "Sports", match: CATEGORIES[3].match },
+  { id: "news", label: "News", match: CATEGORIES[4].match },
+  { id: "kids", label: "Kids", match: CATEGORIES[5].match },
+  { id: "movies", label: "Movies", match: CATEGORIES[1].match },
+  { id: "series", label: "Shows", match: CATEGORIES[2].match },
+  { id: "other", label: "Everything else", match: () => true },
+] as const;
+
+function timeLeft(program: BaseItem | undefined, now: number) {
+  const end = Date.parse(program?.EndDate ?? "");
+  if (!Number.isFinite(end) || end <= now) return "";
+  const minutes = Math.max(1, Math.round((end - now) / 60_000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m left` : `${minutes}m left`;
+}
+
+function OnNow({ channels, grouped }: { channels: BaseItem[]; grouped: boolean }) {
   const now = useNow(30_000);
   if (!channels.length) return <p className="empty">Nothing in this category is on right now.</p>;
+  if (!grouped) return <LiveTiles channels={channels} now={now} />;
+  const sections = GROUPS.map((group) => ({ ...group, channels: [] as BaseItem[] }));
+  for (const channel of channels) sections.find((group) => group.match(channel.CurrentProgram))?.channels.push(channel);
   return (
-    <div className="channel-grid">
+    <>
+      {sections
+        .filter((group) => group.channels.length)
+        .map((group) => (
+          <section key={group.id} className="onair-group">
+            <h2>
+              {group.label}
+              <small>{group.channels.length}</small>
+            </h2>
+            {/* Games of one league sit together, so the NHL slate isn't scattered between the NFL's. */}
+            <LiveTiles
+              channels={group.id === "sports" ? [...group.channels].sort((a, b) => (a.CurrentProgram?.Name ?? "").localeCompare(b.CurrentProgram?.Name ?? "")) : group.channels}
+              now={now}
+            />
+          </section>
+        ))}
+    </>
+  );
+}
+
+function LiveTiles({ channels, now }: { channels: BaseItem[]; now: number }) {
+  const session = useSession();
+  const { play, busy } = usePlayback();
+  return (
+    <div className="onair-tiles">
       {channels.map((channel) => {
         const program = channel.CurrentProgram;
-        const art = program ? thumbUrl(session, program) ?? primaryUrl(session, program) : undefined;
         const logo = primaryUrl(session, channel);
+        const left = timeLeft(program, now);
         return (
-          <button key={channel.Id} className="channel-card" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: "/livetv" })}>
-            <span className="channel-art" style={{ background: tile(channel.Name) }}>
-              {art ? <img src={art} alt="" loading="lazy" decoding="async" /> : null}
-              <span className="channel-badge">
-                {logo ? <img src={logo} alt="" loading="lazy" /> : <b>{channel.ChannelNumber ?? channel.Name.slice(0, 3)}</b>}
+          <button key={channel.Id} className="onair-tile" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: "/livetv" })}>
+            <span className="onair-logo" style={{ background: tile(channel.Name) }}>
+              {logo ? <img src={logo} alt="" loading="lazy" decoding="async" /> : <b>{channel.ChannelNumber ?? channel.Name.slice(0, 3)}</b>}
+              <span className="onair-play">
+                <IconPlay size={18} />
               </span>
-              <span className="channel-play">
-                <IconPlay size={20} />
-              </span>
+            </span>
+            <span className="onair-copy">
+              <strong>{program?.Name ?? channel.Name}</strong>
+              <small>{[channel.ChannelNumber ? `${channel.ChannelNumber} ${channel.Name}` : channel.Name, program ? `${clock(program.StartDate)} – ${clock(program.EndDate)}` : ""].filter(Boolean).join(" · ")}</small>
               {program ? (
-                <span className="channel-progress">
-                  <span style={{ width: `${progressOf(program, now)}%` }} />
+                <span className="onair-progress">
+                  <span className="onair-bar">
+                    <span style={{ width: `${progressOf(program, now)}%` }} />
+                  </span>
+                  {left ? <em>{left}</em> : null}
                 </span>
               ) : null}
-            </span>
-            <span className="channel-copy">
-              <strong>{program?.Name ?? channel.Name}</strong>
-              <small>
-                {[channel.ChannelNumber ? `${channel.ChannelNumber} ${channel.Name}` : channel.Name, program ? `${clock(program.StartDate)} – ${clock(program.EndDate)}` : ""]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </small>
             </span>
           </button>
         );
