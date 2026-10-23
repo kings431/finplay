@@ -23,6 +23,14 @@ export function dayKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/** A YYYY-MM-DD day key back to a local date, or null if it isn't one. */
+export function parseDay(key: string | null | undefined) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key ?? "");
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 /** The week of games starting at `date`. The desktop app asks through its backend (the API sends no CORS
  * headers); the TV app's package may call out freely. */
 export async function nhlSchedule(date: string): Promise<NhlGame[]> {

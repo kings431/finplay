@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useCached } from "../cache";
 import { IconPlay } from "../icons";
 import { usePlayback } from "../playback";
-import { dayKey, isLive, isOver, nhlSchedule, watchOptions, type NhlGame } from "../sports";
+import { dayKey, isLive, isOver, nhlSchedule, parseDay, watchOptions, type NhlGame } from "../sports";
 import type { BaseItem } from "../types";
 
 const clock = (stamp: string) => new Date(stamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -20,15 +20,25 @@ function addDays(date: Date, days: number) {
 }
 
 /** The NHL's games for a week, a day at a time, with the channels each is on. */
-export function Hockey({ channels }: { channels: BaseItem[] }) {
+export function Hockey({
+  channels,
+  initial,
+  back,
+}: {
+  channels: BaseItem[];
+  /** The week and day to open on, from where a stream was left. */
+  initial: { week: string | null; day: string | null };
+  /** Where leaving a stream returns to, so it lands on this day again. */
+  back: (view: Record<string, string>) => string;
+}) {
   const { play, busy } = usePlayback();
   const today = useMemo(() => {
     const date = new Date();
     date.setHours(0, 0, 0, 0);
     return date;
   }, []);
-  const [weekStart, setWeekStart] = useState(today);
-  const [selected, setSelected] = useState(dayKey(today));
+  const [weekStart, setWeekStart] = useState(() => parseDay(initial.week) ?? today);
+  const [selected, setSelected] = useState(() => (parseDay(initial.day) ? (initial.day as string) : dayKey(parseDay(initial.week) ?? today)));
   const days = useMemo(() => Array.from({ length: 7 }, (_, at) => addDays(weekStart, at)), [weekStart]);
   // The API files games under US Eastern days, so a local day can start in the one before and end in the one after.
   const first = useCached(`nhl:${dayKey(addDays(weekStart, -1))}`, () => nhlSchedule(dayKey(addDays(weekStart, -1))), { maxAge: 60_000 });
@@ -89,7 +99,7 @@ export function Hockey({ channels }: { channels: BaseItem[] }) {
           const live = isLive(game);
           const over = isOver(game);
           const best = options[0]?.channel;
-          const watch = (channel: BaseItem) => void play(channel, { fromStart: true, returnTo: "/livetv" });
+          const watch = (channel: BaseItem) => void play(channel, { fromStart: true, returnTo: back({ week: dayKey(weekStart), day: selected }) });
           return (
             <div key={game.id} className={`hky-game${live ? " live" : ""}${over ? " over" : ""}`}>
               <button className="hky-main" disabled={busy || over || !best} onClick={() => best && watch(best)} title={best ? `Watch on ${best.Name}` : over ? "" : "Not on any of your channels"}>

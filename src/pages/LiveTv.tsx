@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useCached } from "../cache";
 import { IconPlay } from "../icons";
 import { primaryUrl, tile } from "../media";
@@ -41,9 +42,15 @@ function progressOf(program: BaseItem | undefined, now: number) {
 
 export function LiveTv() {
   const client = useClient();
-  // The guide is the better starting point, and where leaving a stream lands.
-  const [tab, setTab] = useState<"now" | "guide" | "hockey">("guide");
-  const [category, setCategory] = useState<(typeof CATEGORIES)[number]["id"]>("all");
+  // The guide is the better starting point. Leaving a stream comes back with where it was left in the address.
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState<"now" | "guide" | "hockey">(() => {
+    const wanted = params.get("tab");
+    return wanted === "now" || wanted === "hockey" ? wanted : "guide";
+  });
+  const [category, setCategory] = useState<(typeof CATEGORIES)[number]["id"]>(() => CATEGORIES.find((entry) => entry.id === params.get("cat"))?.id ?? "all");
+  /** Where leaving a stream returns to: this tab, and what was chosen on it. */
+  const back = (view: Record<string, string> = {}) => `/livetv?${new URLSearchParams({ tab, ...(tab === "now" ? { cat: category } : {}), ...view })}`;
   const { data, error, loading } = useCached("livetv:channels", async () => (await client.liveChannels()).Items ?? [], { maxAge: 60_000 });
   const channels = data ?? [];
   const matcher = CATEGORIES.find((entry) => entry.id === category)!.match;
@@ -83,11 +90,11 @@ export function LiveTv() {
               );
             })}
           </div>
-          <OnNow channels={channels.filter((channel) => matcher(channel.CurrentProgram))} grouped={category === "all"} />
+          <OnNow channels={channels.filter((channel) => matcher(channel.CurrentProgram))} grouped={category === "all"} returnTo={back()} />
         </>
       ) : null}
-      {channels.length && tab === "guide" ? <Guide channels={channels} /> : null}
-      {channels.length && tab === "hockey" ? <Hockey channels={channels} /> : null}
+      {channels.length && tab === "guide" ? <Guide channels={channels} returnTo={back()} /> : null}
+      {channels.length && tab === "hockey" ? <Hockey channels={channels} initial={{ week: params.get("week"), day: params.get("day") }} back={back} /> : null}
     </div>
   );
 }
@@ -109,10 +116,10 @@ function timeLeft(program: BaseItem | undefined, now: number) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m left` : `${minutes}m left`;
 }
 
-function OnNow({ channels, grouped }: { channels: BaseItem[]; grouped: boolean }) {
+function OnNow({ channels, grouped, returnTo }: { channels: BaseItem[]; grouped: boolean; returnTo: string }) {
   const now = useNow(30_000);
   if (!channels.length) return <p className="empty">Nothing in this category is on right now.</p>;
-  if (!grouped) return <LiveTiles channels={channels} now={now} />;
+  if (!grouped) return <LiveTiles channels={channels} now={now} returnTo={returnTo} />;
   const sections = GROUPS.map((group) => ({ ...group, channels: [] as BaseItem[] }));
   for (const channel of channels) sections.find((group) => group.match(channel.CurrentProgram))?.channels.push(channel);
   return (
@@ -129,6 +136,7 @@ function OnNow({ channels, grouped }: { channels: BaseItem[]; grouped: boolean }
             <LiveTiles
               channels={group.id === "sports" ? [...group.channels].sort((a, b) => (a.CurrentProgram?.Name ?? "").localeCompare(b.CurrentProgram?.Name ?? "")) : group.channels}
               now={now}
+              returnTo={returnTo}
             />
           </section>
         ))}
@@ -136,7 +144,7 @@ function OnNow({ channels, grouped }: { channels: BaseItem[]; grouped: boolean }
   );
 }
 
-function LiveTiles({ channels, now }: { channels: BaseItem[]; now: number }) {
+function LiveTiles({ channels, now, returnTo }: { channels: BaseItem[]; now: number; returnTo: string }) {
   const session = useSession();
   const { play, busy } = usePlayback();
   return (
@@ -146,7 +154,7 @@ function LiveTiles({ channels, now }: { channels: BaseItem[]; now: number }) {
         const logo = primaryUrl(session, channel);
         const left = timeLeft(program, now);
         return (
-          <button key={channel.Id} className="onair-tile" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: "/livetv" })}>
+          <button key={channel.Id} className="onair-tile" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo })}>
             <span className="onair-logo" style={{ background: tile(channel.Name) }}>
               {logo ? <img src={logo} alt="" loading="lazy" decoding="async" /> : <b>{channel.ChannelNumber ?? channel.Name.slice(0, 3)}</b>}
               <span className="onair-play">
@@ -172,7 +180,7 @@ function LiveTiles({ channels, now }: { channels: BaseItem[]; now: number }) {
   );
 }
 
-function Guide({ channels }: { channels: BaseItem[] }) {
+function Guide({ channels, returnTo }: { channels: BaseItem[]; returnTo: string }) {
   const client = useClient();
   const session = useSession();
   const { play, busy } = usePlayback();
@@ -264,7 +272,7 @@ function Guide({ channels }: { channels: BaseItem[] }) {
             const logo = primaryUrl(session, channel);
             return (
               <div key={channel.Id} className="guide-row">
-                <button className="guide-channel" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: "/livetv" })} title={`Watch ${channel.Name}`}>
+                <button className="guide-channel" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo })} title={`Watch ${channel.Name}`}>
                   {logo ? <img src={logo} alt="" loading="lazy" /> : null}
                   <span>
                     <b>{channel.ChannelNumber}</b> {logo ? "" : channel.Name}
@@ -281,7 +289,7 @@ function Guide({ channels }: { channels: BaseItem[] }) {
                         className={`guide-program${airing ? " airing" : ""}`}
                         style={{ left: box.left, width: box.width }}
                         disabled={!airing || busy}
-                        onClick={() => airing && void play(channel, { fromStart: true, returnTo: "/livetv" })}
+                        onClick={() => airing && void play(channel, { fromStart: true, returnTo })}
                         title={[program.Name, program.EpisodeTitle, program.Overview].filter(Boolean).join("\n\n")}
                       >
                         <strong>{program.Name}</strong>
