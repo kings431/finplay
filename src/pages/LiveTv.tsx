@@ -93,7 +93,7 @@ export function LiveTv() {
           <OnNow channels={channels.filter((channel) => matcher(channel.CurrentProgram))} grouped={category === "all"} returnTo={back()} />
         </>
       ) : null}
-      {channels.length && tab === "guide" ? <Guide channels={channels} returnTo={back()} /> : null}
+      {channels.length && tab === "guide" ? <Guide channels={channels} back={back} initial={{ hours: params.get("hours"), top: params.get("top"), left: params.get("left") }} /> : null}
       {channels.length && tab === "hockey" ? <Hockey channels={channels} initial={{ week: params.get("week"), day: params.get("day") }} back={back} /> : null}
     </div>
   );
@@ -180,13 +180,34 @@ function LiveTiles({ channels, now, returnTo }: { channels: BaseItem[]; now: num
   );
 }
 
-function Guide({ channels, returnTo }: { channels: BaseItem[]; returnTo: string }) {
+function Guide({
+  channels,
+  back,
+  initial,
+}: {
+  channels: BaseItem[];
+  /** Where leaving a stream returns to, given how the guide is scrolled. */
+  back: (view: Record<string, string>) => string;
+  initial: { hours: string | null; top: string | null; left: string | null };
+}) {
   const client = useClient();
   const session = useSession();
   const { play, busy } = usePlayback();
   const now = useNow(60_000);
   const scroller = useRef<HTMLDivElement>(null);
-  const [offsetHours, setOffsetHours] = useState(0);
+  const [offsetHours, setOffsetHours] = useState(() => {
+    const hours = Number(initial.hours);
+    return Number.isInteger(hours) && hours >= 0 && hours <= 7 * 24 ? hours : 0;
+  });
+  // Coming back from a stream puts the guide where it was left, not at the top of "now".
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element) return;
+    element.scrollTop = Number(initial.top) || 0;
+    element.scrollLeft = Number(initial.left) || 0;
+  }, []);
+  const leaving = () =>
+    back({ hours: String(offsetHours), top: String(Math.round(scroller.current?.scrollTop ?? 0)), left: String(Math.round(scroller.current?.scrollLeft ?? 0)) });
   const start = useMemo(() => {
     const date = new Date();
     date.setMinutes(date.getMinutes() < 30 ? 0 : 30, 0, 0);
@@ -272,7 +293,7 @@ function Guide({ channels, returnTo }: { channels: BaseItem[]; returnTo: string 
             const logo = primaryUrl(session, channel);
             return (
               <div key={channel.Id} className="guide-row">
-                <button className="guide-channel" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo })} title={`Watch ${channel.Name}`}>
+                <button className="guide-channel" disabled={busy} onClick={() => void play(channel, { fromStart: true, returnTo: leaving() })} title={`Watch ${channel.Name}`}>
                   {logo ? <img src={logo} alt="" loading="lazy" /> : null}
                   <span>
                     <b>{channel.ChannelNumber}</b> {logo ? "" : channel.Name}
@@ -289,7 +310,7 @@ function Guide({ channels, returnTo }: { channels: BaseItem[]; returnTo: string 
                         className={`guide-program${airing ? " airing" : ""}`}
                         style={{ left: box.left, width: box.width }}
                         disabled={!airing || busy}
-                        onClick={() => airing && void play(channel, { fromStart: true, returnTo })}
+                        onClick={() => airing && void play(channel, { fromStart: true, returnTo: leaving() })}
                         title={[program.Name, program.EpisodeTitle, program.Overview].filter(Boolean).join("\n\n")}
                       >
                         <strong>{program.Name}</strong>
