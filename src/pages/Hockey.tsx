@@ -84,7 +84,6 @@ export function Hockey({
           return (
             <button key={key} className={key === selected ? "on" : ""} onClick={() => setSelected(key)}>
               {key === dayKey(today) ? "Today" : date.toLocaleDateString(undefined, { weekday: "short" })}
-              <small className="chip-count">{date.getDate()}</small>
               <small className="chip-count">{count ? `${count} ${count === 1 ? "game" : "games"}` : ""}</small>
             </button>
           );
