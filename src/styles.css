@@ -677,6 +677,34 @@ button.nav-btn { border: 0; background: none; }
 .onair-bar { flex: 1; height: 4px; border-radius: 2px; background: rgb(var(--fg-rgb) / 0.14); overflow: hidden; }
 .onair-bar span { display: block; height: 100%; background: var(--accent); }
 .onair-progress em { flex: none; font-style: normal; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Live TV "Hockey": a day's games, each with the channels it is on. */
+.hky .guide-nav { padding: 0 56px; margin-bottom: 10px; }
+.hky-days button { display: inline-flex; align-items: baseline; }
+.hky-days .chip-count:last-child { min-width: 0; }
+.hky-games { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; padding: 10px 56px 24px; }
+.hky-game { display: grid; border: 1px solid var(--line); border-radius: 16px; background: rgb(var(--fg-rgb) / 0.04); overflow: hidden; }
+.hky-game.live { border-color: rgb(239 68 68 / 0.55); }
+.hky-game.over { opacity: 0.72; }
+.hky-main {
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 96px minmax(0, 1fr); align-items: center; gap: 8px;
+  padding: 16px 18px 12px; border: 0; background: none; color: inherit; text-align: left;
+}
+.hky-main:not(:disabled):hover, [data-couch] .hky-main:focus { background: rgb(var(--fg-rgb) / 0.07); }
+.hky-team { display: grid; justify-items: start; gap: 2px; min-width: 0; }
+.hky-team.home { justify-items: end; text-align: right; }
+.hky-team img { width: 44px; height: 44px; object-fit: contain; margin-bottom: 4px; }
+.hky-team strong { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.hky-team small { color: var(--muted); font-size: 12px; }
+.hky-mid { display: grid; justify-items: center; gap: 2px; }
+.hky-mid b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.hky-mid small { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.hky-game.live .hky-mid small { color: #ef4444; font-weight: 700; }
+.hky-play { position: absolute; top: 10px; right: 12px; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--fg); color: var(--bg); opacity: 0; transition: opacity 120ms ease; }
+.hky-main:hover:not(:disabled) .hky-play, .hky-main:focus-visible .hky-play { opacity: 1; }
+.hky-watch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 18px 14px; border-top: 1px solid var(--line); min-height: 28px; }
+.hky-watch small { color: var(--muted); font-size: 12px; }
+.hky-chip { border: 0; border-radius: 99px; padding: 5px 12px; font-size: 12.5px; background: rgb(var(--fg-rgb) / 0.1); color: var(--fg); }
+.hky-chip:hover:not(:disabled), [data-couch] .hky-chip:focus { background: var(--fg); color: var(--bg); }
 .chip-count { margin-left: 8px; opacity: 0.6; font-size: 12px; }
 .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px 16px; padding: 8px 56px 0; }
 .channel-card { border: 0; background: none; padding: 0; color: inherit; text-align: left; display: flex; flex-direction: column; gap: 8px; }

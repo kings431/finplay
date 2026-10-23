@@ -8,6 +8,7 @@ mod host_env;
 mod libmpv;
 mod mpris;
 mod mpv;
+mod sports;
 mod stats;
 mod trailer;
 
@@ -16,6 +17,7 @@ use downloads::{download_delete, download_dir, download_list, download_progress,
 use mpv::{player_focus, player_mini, player_play, player_request, player_stop, player_thumb, PlayerState};
 #[cfg(target_os = "linux")]
 use mpv::maybe_test_play;
+use sports::sports_schedule;
 use stats::open_stats;
 use trailer::{play_trailer, trailer_stream};
 use tauri::Manager;
@@ -88,6 +90,7 @@ pub fn run() {
             download_delete,
             download_progress,
             open_stats,
+            sports_schedule,
             play_trailer,
             trailer_stream,
             device_name,

@@ -4,6 +4,7 @@ import { IconPlay } from "../icons";
 import { primaryUrl, tile } from "../media";
 import { usePlayback } from "../playback";
 import { useClient, useSession } from "../session";
+import { Hockey } from "./Hockey";
 import type { BaseItem } from "../types";
 
 const PX_PER_MINUTE = 6;
@@ -41,7 +42,7 @@ function progressOf(program: BaseItem | undefined, now: number) {
 export function LiveTv() {
   const client = useClient();
   // The guide is the better starting point, and where leaving a stream lands.
-  const [tab, setTab] = useState<"now" | "guide">("guide");
+  const [tab, setTab] = useState<"now" | "guide" | "hockey">("guide");
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]["id"]>("all");
   const { data, error, loading } = useCached("livetv:channels", async () => (await client.liveChannels()).Items ?? [], { maxAge: 60_000 });
   const channels = data ?? [];
@@ -60,6 +61,9 @@ export function LiveTv() {
           </button>
           <button className={tab === "now" ? "on" : ""} onClick={() => setTab("now")}>
             On now
+          </button>
+          <button className={tab === "hockey" ? "on" : ""} onClick={() => setTab("hockey")}>
+            Hockey
           </button>
         </div>
       </header>
@@ -83,6 +87,7 @@ export function LiveTv() {
         </>
       ) : null}
       {channels.length && tab === "guide" ? <Guide channels={channels} /> : null}
+      {channels.length && tab === "hockey" ? <Hockey channels={channels} /> : null}
     </div>
   );
 }
