@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useCached } from "../cache";
 import { IconPlay } from "../icons";
 import { usePlayback } from "../playback";
+import { useClient } from "../session";
 import { dayKey, isLive, isOver, nhlSchedule, parseDay, watchOptions, type NhlGame } from "../sports";
 import type { BaseItem } from "../types";
 
@@ -60,6 +61,21 @@ export function Hockey({
 
   const games = byDay.get(selected) ?? [];
 
+  // The guide around the chosen day: per-game channels only say which game
+  // they carry there ("Upcoming: Mammoth at Maple Leafs"), before and during it.
+  const client = useClient();
+  const ids = useMemo(() => channels.map((channel) => channel.Id), [channels]);
+  const guide = useCached(games.length ? `nhl:guide:${selected}:${ids.length}` : null, async () => {
+    const day = parseDay(selected) ?? today;
+    const from = new Date(day.getTime() - 12 * 60 * 60 * 1000);
+    const to = new Date(day.getTime() + 30 * 60 * 60 * 1000);
+    const pages = await Promise.all(
+      Array.from({ length: Math.ceil(ids.length / 100) }, (_, at) => client.livePrograms(ids.slice(at * 100, at * 100 + 100), from, to).catch(() => ({ Items: [] }))),
+    );
+    return pages.flatMap((page) => page.Items ?? []);
+  }, { maxAge: 5 * 60_000 });
+  const programs = guide.data ?? [];
+
   const move = (weeks: number) => {
     const start = addDays(weekStart, weeks * 7);
     setWeekStart(start);
@@ -94,7 +110,7 @@ export function Hockey({
       {!loading && !error && games.length === 0 ? <p className="empty">No NHL games this day.</p> : null}
       <div className="hky-games">
         {games.map((game) => {
-          const options = watchOptions(game, channels);
+          const options = watchOptions(game, channels, programs);
           const live = isLive(game);
           const over = isOver(game);
           const best = options[0]?.channel;
